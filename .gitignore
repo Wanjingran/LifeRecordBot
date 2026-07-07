@@ -1,0 +1,29 @@
+# Secrets
+config.json
+.env
+*.key
+*.pem
+
+# Runtime state and logs
+state.json
+bot.log
+*.log
+
+# Personal records generated while using the bot
+records/
+charts/
+photos/
+*.csv
+*.jsonl
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local editor and OS files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,9 @@
+﻿{
+  "telegram_bot_token": "PASTE_TELEGRAM_BOT_TOKEN_HERE",
+  "deepseek_api_key": "PASTE_DEEPSEEK_API_KEY_HERE",
+  "deepseek_model": "deepseek-chat",
+  "default_city": "北京",
+  "allowed_user_ids": [],
+  "ocr_lang": "chi_sim+eng",
+  "tesseract_cmd": ""
+}
