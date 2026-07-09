@@ -912,11 +912,27 @@ def assert_local_handle_cases(failures: list[str]) -> None:
             bot.call_deepseek = original_call_deepseek
 
 
+
+def assert_expense_category_cases(failures: list[str]) -> None:
+    cases = [
+        (U(r"\u65e9\u9910"), U(r"\u5176\u4ed6"), U(r"\u9910\u996e")),
+        (U(r"\u65e9\u996d"), U(r"\u5176\u4ed6"), U(r"\u9910\u996e")),
+        (U(r"\u5348\u996d"), U(r"\u5176\u4ed6"), U(r"\u9910\u996e")),
+        (U(r"\u665a\u996d"), U(r"\u5176\u4ed6"), U(r"\u9910\u996e")),
+        (U(r"\u665a\u9910"), U(r"\u5176\u4ed6"), U(r"\u9910\u996e")),
+        (U(r"\u665a\u996d"), U(r"\u9910\u996e"), U(r"\u9910\u996e")),
+        ("qq音乐", U(r"\u5176\u4ed6"), U(r"\u5a31\u4e50")),
+    ]
+    for name, category, expected in cases:
+        actual = bot.normalize_expense_category(name, category)
+        if actual != expected:
+            failures.append(f"expense category: {name!r}/{category!r} expected {expected!r}, got {actual!r}")
 def main() -> None:
     failures: list[str] = []
     assert_route_cases(failures)
     assert_augment_cases(failures)
     assert_local_handle_cases(failures)
+    assert_expense_category_cases(failures)
     assert_note_confirmation_cases(failures)
     assert_note_guard_cases(failures)
     assert_goal_tone_history_cases(failures)
@@ -935,7 +951,7 @@ def main() -> None:
         for failure in failures:
             print("- " + failure)
         raise SystemExit(1)
-    print(f"OK: {len(CASES)} route cases, {len(CITY_CASES)} city cases, {len(AUGMENT_CASES)} augment cases, {len(LOCAL_HANDLE_CASES)} local handle cases, note confirmation, note guard, goal/tone/history, important items, routine confirmation, unified tasks, bulk task completion, support layer, record management, confirmation center, weather/mood boundary, answer filter, {len(MULTI_HANDLE_CASES)} multi handle cases")
+    print(f"OK: {len(CASES)} route cases, {len(CITY_CASES)} city cases, {len(AUGMENT_CASES)} augment cases, {len(LOCAL_HANDLE_CASES)} local handle cases, expense category, note confirmation, note guard, goal/tone/history, important items, routine confirmation, unified tasks, bulk task completion, support layer, record management, confirmation center, weather/mood boundary, answer filter, {len(MULTI_HANDLE_CASES)} multi handle cases")
 
 
 if __name__ == "__main__":
