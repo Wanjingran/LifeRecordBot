@@ -2146,7 +2146,58 @@ def complete_all_unified_tasks(text: str = "") -> str:
         return "\u6ca1\u6709\u627e\u5230\u53ef\u5b8c\u6210\u7684\u4eca\u65e5\u4efb\u52a1\u3002"
     return "\u5df2\u5b8c\u6210\u5168\u90e8\u4eca\u65e5\u4efb\u52a1\uff1a\n" + "\n".join(f"- {reply}" for reply in replies)
 
+
+def natural_todo_due_date(text: str) -> str:
+    today = datetime.now().date()
+    if "\u540e\u5929" in text:
+        return (today + timedelta(days=2)).isoformat()
+    if "\u660e\u5929" in text:
+        return (today + timedelta(days=1)).isoformat()
+    if "\u4eca\u5929" in text or "\u4eca\u665a" in text:
+        return today.isoformat()
+    return ""
+
+
+def natural_todo_items_from_text(text: str) -> list[str]:
+    if any(word in text for word in ("\u5f85\u529e", "\u4efb\u52a1\u5217\u8868", "\u4eca\u65e5\u4efb\u52a1", "\u7b2c\u4e00\u4e2a", "\u7b2c\u4e8c\u4e2a", "\u7b2c\u4e09\u4e2a", "\u7b2c1", "\u7b2c2", "\u7b2c3")):
+        return []
+    if not any(word in text for word in ("\u4eca\u5929", "\u660e\u5929", "\u540e\u5929", "\u4eca\u665a")):
+        return []
+    if not any(word in text for word in ("\u8981", "\u9700\u8981", "\u5f97", "\u5fc5\u987b", "\u8ba1\u5212", "\u5b89\u6392")):
+        return []
+    if not any(word in text for word in ("\u5b8c\u6210", "\u505a\u5b8c", "\u641e\u5b9a", "\u5f04\u5b8c", "\u5904\u7406\u5b8c", "\u5199\u5b8c", "\u6d4b\u8bd5\u5b8c")):
+        return []
+    if has_expense_hint(text) or has_income_hint(text) or has_weather_hint(text):
+        return []
+
+    parts = re.split(r"[\uFF0C,\u3002\uFF1B;\u3001]+", text)
+    items: list[str] = []
+    for part in parts:
+        if not part.strip():
+            continue
+        if not any(word in part for word in ("\u5b8c\u6210", "\u505a\u5b8c", "\u641e\u5b9a", "\u5f04\u5b8c", "\u5904\u7406\u5b8c", "\u5199\u5b8c", "\u6d4b\u8bd5\u5b8c")):
+            continue
+        cleaned = part
+        cleaned = re.sub(r"(\u4eca\u5929|\u660e\u5929|\u540e\u5929|\u4eca\u665a|\u6211|\u81ea\u5df1|\u5148|\u7136\u540e|\u987a\u4fbf)", "", cleaned)
+        cleaned = re.sub(r"(\u9700\u8981|\u5fc5\u987b|\u8ba1\u5212|\u5b89\u6392|\u8981\u628a|\u8981\u5c06|\u628a|\u5c06|\u4e5f\u8981|\u90fd\u8981|\u8981|\u5f97)", "", cleaned)
+        cleaned = re.sub(r"(\u5b8c\u6210|\u505a\u5b8c|\u641e\u5b9a|\u5f04\u5b8c|\u5904\u7406\u5b8c|\u5199\u5b8c|\u6d4b\u8bd5\u5b8c)+$", "", cleaned)
+        cleaned = cleaned.strip(" \uFF1A:\uFF0C,\u3002\uFF1B;\u3001")
+        if cleaned and cleaned not in items:
+            items.append(cleaned)
+    return items
+
+
+def natural_todo_creation_reply(text: str) -> str | None:
+    items = natural_todo_items_from_text(text)
+    if not items:
+        return None
+    due_date = natural_todo_due_date(text)
+    return save_todo_action({"type": "todo", "items": [{"text": item, "due_date": due_date} for item in items]})
+
+
 def complete_task_from_text(text: str, chat_id: int | None) -> str | None:
+    if natural_todo_items_from_text(text):
+        return None
     if not task_completion_words(text):
         return None
     if is_complete_all_tasks_request(text):
@@ -2159,7 +2210,7 @@ def complete_task_from_text(text: str, chat_id: int | None) -> str | None:
     query = task_completion_query(text)
     tasks = unified_task_rows()
     if not tasks:
-        return "?????????????"
+        return "\u73b0\u5728\u6ca1\u6709\u5f85\u5b8c\u6210\u7684\u4eca\u65e5\u4efb\u52a1\u3002\u4f60\u60f3\u65b0\u589e\u5f85\u529e\u7684\u8bdd\uff0c\u53ef\u4ee5\u8bf4\uff1a\u4eca\u5929\u8981\u628a\u524d\u540e\u7aef\u6d4b\u8bd5\u5b8c\u6210\u3002"
     scored = [(task_match_score(item, query), item) for item in tasks]
     matches = [item for score, item in scored if score > 0]
     if len(matches) == 1:
@@ -2171,7 +2222,7 @@ def complete_task_from_text(text: str, chat_id: int | None) -> str | None:
             return complete_unified_task(top[0], text)
         return queue_task_completion_confirmation(chat_id, matches)
     if query:
-        return "??????????????????????????"
+        return "\u6ca1\u627e\u5230\u5339\u914d\u7684\u4eca\u65e5\u4efb\u52a1\u3002\u4f60\u53ef\u4ee5\u53d1\u201c\u4eca\u65e5\u4efb\u52a1\u201d\u5148\u770b\u5217\u8868\uff0c\u6216\u8bf4\u201c\u6dfb\u52a0\u5f85\u529e ...\u201d\u3002"
     return queue_task_completion_confirmation(chat_id, tasks)
 
 def repeat_period_from_text(text: str) -> str | None:
@@ -4849,6 +4900,10 @@ def handle_text(config: dict, text: str, reply_context: str = "", chat_id: int |
         if note_action:
             return save_parsed(note_action)
         return "要记的内容我没看清。你可以这样说：记一下今天去了图书馆。"
+
+    natural_todo_reply = natural_todo_creation_reply(text)
+    if natural_todo_reply:
+        return with_support_layer(natural_todo_reply, text, {"todo"})
 
     goal_reply = save_goal_from_text(text, chat_id)
     if goal_reply:

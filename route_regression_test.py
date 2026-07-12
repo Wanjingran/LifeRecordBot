@@ -594,6 +594,33 @@ def assert_unified_task_cases(failures: list[str]) -> None:
 
 
 
+
+def assert_natural_todo_creation_cases(failures: list[str]) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        retarget_data_paths(Path(tmp))
+        bot.ensure_files()
+        original_call_deepseek = bot.call_deepseek
+
+        def fail_call_deepseek(*_args, **_kwargs):
+            raise AssertionError("natural todo case unexpectedly called DeepSeek")
+
+        bot.call_deepseek = fail_call_deepseek
+        try:
+            config = {"deepseek_api_key": "", "deepseek_model": "", "default_city": ""}
+            reply = bot.handle_text(config, U(r"\u4eca\u5929\u8981\u628a\u524d\u540e\u7aef\u7684\u6d4b\u8bd5\u5b8c\u6210\uff0c\u529f\u80fd\u4e5f\u8981\u5b8c\u6210"), chat_id=940)
+            rows = bot.read_csv_rows(bot.TODOS_CSV)
+            texts = [row.get("text", "") for row in rows]
+            today = bot.datetime.now().date().isoformat()
+            if not isinstance(reply, str) or "\u5df2\u52a0\u5165\u5f85\u529e" not in reply or "?" in reply:
+                failures.append(f"natural todo creation: unexpected reply {reply!r}")
+            if len(rows) != 2 or not any("\u524d\u540e\u7aef\u7684\u6d4b\u8bd5" in item for item in texts) or "\u529f\u80fd" not in texts:
+                failures.append(f"natural todo creation: unexpected rows {rows!r}")
+            if any(row.get("due_date") != today for row in rows):
+                failures.append(f"natural todo creation: expected today's due date, rows={rows!r}")
+        finally:
+            bot.call_deepseek = original_call_deepseek
+
+
 def assert_bulk_task_completion_cases(failures: list[str]) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         retarget_data_paths(Path(tmp))
@@ -940,6 +967,7 @@ def main() -> None:
     assert_routine_confirmation_cases(failures)
     assert_unified_task_cases(failures)
     assert_bulk_task_completion_cases(failures)
+    assert_natural_todo_creation_cases(failures)
     assert_support_layer_cases(failures)
     assert_record_management_cases(failures)
     assert_confirmation_center_cases(failures)
@@ -951,7 +979,7 @@ def main() -> None:
         for failure in failures:
             print("- " + failure)
         raise SystemExit(1)
-    print(f"OK: {len(CASES)} route cases, {len(CITY_CASES)} city cases, {len(AUGMENT_CASES)} augment cases, {len(LOCAL_HANDLE_CASES)} local handle cases, expense category, note confirmation, note guard, goal/tone/history, important items, routine confirmation, unified tasks, bulk task completion, support layer, record management, confirmation center, weather/mood boundary, answer filter, {len(MULTI_HANDLE_CASES)} multi handle cases")
+    print(f"OK: {len(CASES)} route cases, {len(CITY_CASES)} city cases, {len(AUGMENT_CASES)} augment cases, {len(LOCAL_HANDLE_CASES)} local handle cases, expense category, note confirmation, note guard, goal/tone/history, important items, routine confirmation, unified tasks, bulk task completion, natural todo creation, support layer, record management, confirmation center, weather/mood boundary, answer filter, {len(MULTI_HANDLE_CASES)} multi handle cases")
 
 
 if __name__ == "__main__":
