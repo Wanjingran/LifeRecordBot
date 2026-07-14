@@ -954,12 +954,70 @@ def assert_expense_category_cases(failures: list[str]) -> None:
         actual = bot.normalize_expense_category(name, category)
         if actual != expected:
             failures.append(f"expense category: {name!r}/{category!r} expected {expected!r}, got {actual!r}")
+
+def assert_food_transport_weather_budget_cases(failures: list[str]) -> None:
+    food_cases = [
+        U(r"\u51b0\u6dc7\u6dcb"), U(r"\u51b0\u6dc7\u51cc"), U(r"\u51b0\u6fc0\u51cc"),
+        U(r"\u559d\u6c34"), U(r"\u4e70\u6c34"), U(r"\u6c34"), U(r"\u996e\u54c1"),
+    ]
+    for item in food_cases:
+        actual = bot.normalize_expense_category(item, U(r"\u5176\u4ed6"))
+        if actual != U(r"\u9910\u996e"):
+            failures.append(f"food category expanded: {item!r} -> {actual!r}")
+    traffic_cases = [U(r"\u5750\u5730\u94c1"), U(r"\u5750\u516c\u4ea4"), U(r"\u5927\u5df4")]
+    for item in traffic_cases:
+        actual = bot.normalize_expense_category(item, U(r"\u5176\u4ed6"))
+        if actual != U(r"\u4ea4\u901a"):
+            failures.append(f"traffic category expanded: {item!r} -> {actual!r}")
+    if bot.normalize_expense_category(U(r"\u6c34\u8d39"), U(r"\u5176\u4ed6")) == U(r"\u9910\u996e"):
+        failures.append("food category expanded: ?? should not become ??")
+    config = {"default_city": U(r"\u6df1\u5733")}
+    city_cases = [
+        (U(r"\u9999\u6e2f\u4e0b\u5348\u4f1a\u4e0b\u96e8\u5417"), U(r"\u9999\u6e2f")),
+        (U(r"\u6df1\u5733\u5357\u5c71\u533a\u5929\u6c14\u600e\u4e48\u6837"), U(r"\u6df1\u5733\u5357\u5c71\u533a")),
+        (U(r"\u9999\u6e2f\u5929\u6c14\u600e\u4e48\u6837"), U(r"\u9999\u6e2f")),
+    ]
+    for text, expected in city_cases:
+        actual = bot.extract_city(config, text)
+        if actual != expected:
+            failures.append(f"weather city parse: {text!r} expected {expected!r}, got {actual!r}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        retarget_data_paths(Path(tmp))
+        bot.ensure_files()
+        reply = bot.set_budget(U(r"\u672c\u6708\u6536\u51653000\uff0c\u8ba1\u5212\u77011000"))
+        rows = bot.read_csv_rows(bot.BUDGETS_CSV)
+        if not isinstance(reply, str) or U(r"\u53ef\u652f\u51fa\u9884\u7b97 2000") not in reply:
+            failures.append(f"finance plan budget: unexpected reply {reply!r}")
+        if not rows or rows[-1].get("category") != U(r"\u603b\u989d") or rows[-1].get("amount") != "2000":
+            failures.append(f"finance plan budget: unexpected rows {rows!r}")
+
+def assert_quote_delete_recent_cases(failures: list[str]) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        retarget_data_paths(Path(tmp))
+        bot.ensure_files()
+        created_old = "2026-07-12 10:00:00"
+        created_new = bot.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        bot.append_csv(bot.EXPENSES_CSV, ["2026-07-12", U(r"\u559d\u6c34"), "6", U(r"\u9910\u996e"), "", created_old, "old-water"])
+        bot.append_csv(bot.EXPENSES_CSV, [bot.datetime.now().date().isoformat(), U(r"\u6c34"), "6", U(r"\u9910\u996e"), "", created_new, "new-water"])
+        reply = bot.delete_from_reply_context(U(r"\u559d\u6c34 6\u5143"))
+        rows = bot.read_csv_rows(bot.EXPENSES_CSV)
+        if not isinstance(reply, str) or "new-water" in [row.get("id") for row in rows] or "old-water" not in [row.get("id") for row in rows]:
+            failures.append(f"quote delete recent: reply={reply!r}, rows={rows!r}")
+        reply = bot.delete_from_reply_context(U(r"\u559d\u6c34 6\u5143"))
+        rows = bot.read_csv_rows(bot.EXPENSES_CSV)
+        if not isinstance(reply, str) or "old-water" not in [row.get("id") for row in rows]:
+            failures.append(f"quote delete repeat should not remove old record: reply={reply!r}, rows={rows!r}")
+
+
 def main() -> None:
     failures: list[str] = []
     assert_route_cases(failures)
     assert_augment_cases(failures)
     assert_local_handle_cases(failures)
     assert_expense_category_cases(failures)
+    assert_food_transport_weather_budget_cases(failures)
+    assert_quote_delete_recent_cases(failures)
     assert_note_confirmation_cases(failures)
     assert_note_guard_cases(failures)
     assert_goal_tone_history_cases(failures)
@@ -979,7 +1037,7 @@ def main() -> None:
         for failure in failures:
             print("- " + failure)
         raise SystemExit(1)
-    print(f"OK: {len(CASES)} route cases, {len(CITY_CASES)} city cases, {len(AUGMENT_CASES)} augment cases, {len(LOCAL_HANDLE_CASES)} local handle cases, expense category, note confirmation, note guard, goal/tone/history, important items, routine confirmation, unified tasks, bulk task completion, natural todo creation, support layer, record management, confirmation center, weather/mood boundary, answer filter, {len(MULTI_HANDLE_CASES)} multi handle cases")
+    print(f"OK: {len(CASES)} route cases, {len(CITY_CASES)} city cases, {len(AUGMENT_CASES)} augment cases, {len(LOCAL_HANDLE_CASES)} local handle cases, expense category, food/transport/weather/budget, quote delete recent, note confirmation, note guard, goal/tone/history, important items, routine confirmation, unified tasks, bulk task completion, natural todo creation, support layer, record management, confirmation center, weather/mood boundary, answer filter, {len(MULTI_HANDLE_CASES)} multi handle cases")
 
 
 if __name__ == "__main__":

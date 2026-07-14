@@ -463,6 +463,8 @@ def parse_json_content(content: str) -> dict:
     return validate_action(parsed)
 
 
+
+
 def normalize_expense_category(name: str, category: str) -> str:
     category = (category or "其他").strip()
     aliases = {
@@ -473,19 +475,27 @@ def normalize_expense_category(name: str, category: str) -> str:
     category = aliases.get(category, category)
     valid = {"餐饮", "交通", "购物", "居住", "娱乐", "医疗", "学习", "其他"}
     text = name or ""
+    compact = re.sub(r"\s+", "", text)
     rules = [
-        ("餐饮", ("早餐", "早饭", "早点", "午饭", "午餐", "中饭", "晚饭", "晚餐", "夜宵", "宵夜", "外卖", "奶茶", "咖啡", "饭", "餐", "面", "粉", "粥", "包子", "饺子", "烧烤", "火锅", "麻辣烫", "汉堡", "炸鸡", "水果", "饮料", "可乐", "矿泉水", "食堂", "餐厅", "饭店")),
-        ("交通", ("打车", "出租", "网约车", "滴滴", "地铁", "公交", "高铁", "火车", "机票", "车票", "停车", "过路费", "油费", "共享单车", "骑行")),
-        ("娱乐", ("qq音乐", "QQ音乐", "音乐", "网吧", "游戏", "会员", "电影", "网咖", "续费", "演唱会", "剧本杀", "KTV", "ktv")),
-        ("购物", ("淘宝", "京东", "拼多多", "超市", "买", "衣服", "鞋", "雨伞", "伞", "日用品", "快递")),
+        ("餐饮", ("早餐", "早饭", "早点", "午饭", "午餐", "中饭", "晚饭", "晚餐", "夜宵", "宵夜", "外卖", "奶茶", "咖啡", "冰淇淋", "冰淇凌", "冰激凌", "雪糕", "甜品", "喝水", "买水", "水", "饮品", "饮料", "可乐", "矿泉水", "纯净水", "瓶装水", "汉堡", "炸鸡", "烧烤", "火锅", "麻辣烫", "包子", "饺子", "水果", "食堂", "餐厅", "饭店", "饭", "餐", "面", "粉", "粥")),
+        ("交通", ("打车", "出租", "网约车", "滴滴", "坐地铁", "地铁", "坐公交", "公交", "公交车", "巴士", "大巴", "高铁", "火车", "机票", "车票", "停车", "过路费", "油费", "共享单车", "骑行")),
+        ("娱乐", ("qq音乐", "QQ音乐", "音乐", "网吧", "网咖", "游戏", "会员", "电影", "续费", "演唱会", "剧本杀", "KTV", "ktv")),
+        ("购物", ("淘宝", "京东", "拼多多", "超市", "买", "衣服", "鞋", "雨伞", "伞", "日用品", "快递", "礼物")),
         ("居住", ("房租", "水电", "物业", "宽带", "燃气", "电费", "水费")),
         ("医疗", ("医院", "药", "挂号", "体检", "牙", "诊所")),
         ("学习", ("书", "课程", "培训", "考试", "教材", "资料", "学费")),
     ]
     inferred = "其他"
     for normalized, keywords in rules:
-        if any(keyword in text for keyword in keywords):
-            inferred = normalized
+        for keyword in keywords:
+            if keyword == "水":
+                if compact == "水":
+                    inferred = normalized
+                    break
+            elif keyword in text:
+                inferred = normalized
+                break
+        if inferred != "其他":
             break
     if category in valid and category != "其他":
         return category
@@ -941,10 +951,11 @@ def delete_from_reply_context(reply_context: str) -> str | None:
     for line in candidates:
         parsed = parse_record_line_for_delete(line)
         if parsed:
+            parsed["_quoted"] = True
             result = delete_record(parsed)
             if not result.startswith("没找到"):
                 return result
-    return None
+    return "????????????????????????"
 
 
 
@@ -1141,6 +1152,8 @@ def find_target_record(request_data: dict) -> dict | None:
     date = str(request_data.get("date") or "").strip()
     query = clean_delete_query(str(request_data.get("query") or ""))
     amount = request_data.get("amount")
+    quoted = bool(request_data.get("_quoted"))
+    recent_floor = (datetime.now().date() - timedelta(days=1)).isoformat() if quoted and not date else ""
     best = None
     for kind in record_kinds_for_target(target):
         info = record_rows_info(kind)
@@ -1148,7 +1161,13 @@ def find_target_record(request_data: dict) -> dict | None:
             continue
         main_field = info["spec"]["main_field"]
         for index, row in enumerate(info["rows"]):
+            if recent_floor:
+                row_created = (row.get("created_at", "") or row.get("date", "") or row.get("remind_at", ""))[:10]
+                if row_created and row_created < recent_floor:
+                    continue
             score = delete_match_score(kind, row, main_field, date, query, amount)
+            if score < 0 and quoted and amount not in (None, "") and query:
+                score = delete_match_score(kind, row, main_field, date, "", amount)
             if score < 0:
                 continue
             created_at = row.get("created_at", "")
@@ -3622,7 +3641,7 @@ def local_mood_parse(text: str) -> dict:
 
 
 def extract_city(config: dict, text: str) -> str:
-    match = re.search(r"([\u4e00-\u9fa5]{2,12})(?:天气|会下雨|下雨|气温|温度)", text)
+    match = re.search(r"([\u4e00-\u9fa5]{2,16})(?:天气|会下雨|下雨|会不会下雨|降雨|气温|温度)", text)
     if match:
         candidate = clean_city_name(match.group(1))
         if candidate:
@@ -3637,6 +3656,7 @@ def clean_city_name(candidate: str) -> str:
         "",
         candidate,
     )
+    candidate = re.sub(r"(会|还会|要|要不要|能不能|有没有|适合)+$", "", candidate)
     candidate = candidate.strip(" ，,。？?：:")
     stop_words = {"会", "还会", "要", "要不要", "能不能", "有没有", "适合", "天气", "下雨", "有雨"}
     if len(candidate) < 2 or candidate in stop_words:
@@ -3787,7 +3807,7 @@ def weather_answer(config: dict, text: str) -> str:
     place = results[0]
     latitude = place["latitude"]
     longitude = place["longitude"]
-    display_city = place.get("name") or city
+    display_city = city if any(unit in city for unit in ("区", "县", "旗")) else (place.get("name") or city)
     forecast_params = urlencode({
         "latitude": latitude,
         "longitude": longitude,
@@ -4185,7 +4205,37 @@ def parse_period(text: str) -> str:
     return "month"
 
 
+
+def finance_plan_from_text(text: str) -> str | None:
+    if not any(word in text for word in ("收入", "工资", "生活费")):
+        return None
+    if not any(word in text for word in ("省", "存", "结余", "留下")):
+        return None
+    nums = [float(item) for item in re.findall(r"\d+(?:\.\d+)?", text)]
+    if len(nums) < 2:
+        return None
+    income, saving = nums[0], nums[1]
+    if income <= 0 or saving < 0 or saving >= income:
+        return "财政规划金额不太对。可以这样说：本月收入3000，计划省1000。"
+    spend_limit = income - saving
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows = []
+    if BUDGETS_CSV.exists():
+        with BUDGETS_CSV.open("r", encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.DictReader(f))
+    rows = [row for row in rows if not (row.get("period") == "month" and row.get("category") == "总额")]
+    rows.append({"period": "month", "category": "总额", "amount": f"{spend_limit:g}", "created_at": created_at, "id": uuid.uuid4().hex})
+    with BUDGETS_CSV.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["period", "category", "amount", "created_at", "id"])
+        writer.writeheader()
+        writer.writerows(rows)
+    return f"已做好本月财政规划：收入 {income:g} 元，计划省 {saving:g} 元，本月可支出预算 {spend_limit:g} 元。之后每笔消费都会按总预算提醒。"
+
+
 def set_budget(text: str) -> str | None:
+    plan_reply = finance_plan_from_text(text)
+    if plan_reply:
+        return plan_reply
     if not any(word in text for word in ("预算", "限额")):
         return None
     amount = parse_amount(text)
