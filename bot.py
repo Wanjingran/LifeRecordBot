@@ -483,7 +483,7 @@ def normalize_expense_category(name: str, category: str) -> str:
         ("购物", ("淘宝", "京东", "拼多多", "超市", "买", "衣服", "鞋", "雨伞", "伞", "日用品", "快递", "礼物")),
         ("居住", ("房租", "水电", "物业", "宽带", "燃气", "电费", "水费")),
         ("医疗", ("医院", "药", "挂号", "体检", "牙", "诊所")),
-        ("学习", ("书", "课程", "培训", "考试", "教材", "资料", "学费")),
+        ("学习", ("书", "课程", "培训", "考试", "教材", "资料", "学费", "驾校", "驾考", "报名费")),
     ]
     inferred = "其他"
     for normalized, keywords in rules:
@@ -2468,13 +2468,15 @@ def history_search_reply(text: str) -> str | None:
 def expense_anomaly_for_item(date: str, name: str, amount: float, category: str, history_rows: list[dict]) -> list[str]:
     if amount <= 0:
         return []
+    if category == "其他":
+        return []
     same_category = [safe_amount(row.get("amount")) for row in history_rows if row.get("category") == category and safe_amount(row.get("amount")) > 0]
     lines = []
     if len(same_category) >= 4:
         avg = sum(same_category) / len(same_category)
         previous_max = max(same_category)
         if amount >= max(50, avg * 2.4) and amount >= previous_max * 1.15:
-            lines.append(f"这笔{name or category}比你平时的{category}高不少：{amount:g} 元，历史均值约 {avg:g} 元。")
+            lines.append(f"这笔{name or category}比你平时的{category}高不少：{amount:g} 元，历史均值约 {avg:.1f} 元。")
     try:
         day = datetime.strptime(date, "%Y-%m-%d").date()
     except ValueError:
