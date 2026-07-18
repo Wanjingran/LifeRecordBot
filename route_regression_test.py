@@ -982,6 +982,19 @@ def assert_food_transport_weather_budget_cases(failures: list[str]) -> None:
         "2026-07-18", U(r"\u9a7e\u6821"), 200, U(r"\u5176\u4ed6"), other_rows
     ):
         failures.append("expense anomaly: mixed 'other' category should not produce an average warning")
+    exact_average_rows = [
+        {"date": f"2026-07-{day:02d}", "amount": str(amount), "category": U(r"\u5b66\u4e60")}
+        for day, amount in enumerate((10, 20, 30, 40), start=1)
+    ]
+    exact_average_rows.extend([
+        {"date": "2026-07-05", "amount": "9999", "category": U(r"\u5a31\u4e50")},
+        {"date": "2026-07-06", "amount": "0", "category": U(r"\u5b66\u4e60")},
+    ])
+    average_lines = bot.expense_anomaly_for_item(
+        "2026-07-18", U(r"\u9a7e\u6821"), 200, U(r"\u5b66\u4e60"), exact_average_rows
+    )
+    if not average_lines or U(r"\u5386\u53f2\u5747\u503c\u7ea6 25.0 \u5143") not in average_lines[0]:
+        failures.append(f"expense anomaly: exact same-category average failed: {average_lines!r}")
     if bot.normalize_expense_category(U(r"\u6c34\u8d39"), U(r"\u5176\u4ed6")) == U(r"\u9910\u996e"):
         failures.append("food category expanded: ?? should not become ??")
     config = {"default_city": U(r"\u6df1\u5733")}
