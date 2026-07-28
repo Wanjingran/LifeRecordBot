@@ -33,7 +33,12 @@ GOALS_CSV = DATA_DIR / "goals.csv"
 GOAL_LOGS_CSV = DATA_DIR / "goal_logs.csv"
 RAW_JSONL = DATA_DIR / "raw_messages.jsonl"
 STATE_PATH = ROOT / "state.json"
-DELETE_WORDS = ("\u5220", "\u5220\u9664", "\u64a4\u9500", "\u53d6\u6d88", "\u53bb\u6389", "\u79fb\u9664")
+DELETE_WORDS = (
+    "删", "删除", "删掉", "删去", "移除", "去掉", "撤销", "撤回",
+    "取消", "取消掉", "作废", "清除", "清掉", "抹掉", "关掉", "关闭",
+    "不要了", "不需要了", "停止提醒", "取消任务", "取消待办", "取消目标",
+)
+BUG_FALLBACK_MESSAGE = "抱歉，刚才处理时出现了一个 Bug。请先用 /recent 检查记录是否已经写入，再重试；电脑端已经保留了错误信息。"
 MUTEX_NAME = "Global\\LifeRecordBotSingleInstance"
 WEATHER_WORDS = (
     "天气", "下雨", "有雨", "暴雨", "小雨", "中雨", "大雨", "阵雨", "温度", "气温", "几度", "降水", "刮风", "大风",
@@ -955,7 +960,7 @@ def delete_from_reply_context(reply_context: str) -> str | None:
             result = delete_record(parsed)
             if not result.startswith("没找到"):
                 return result
-    return "????????????????????????"
+    return "没有找到与引用消息对应的记录，可能它已被删除或内容发生了变化。你可以发送 /recent，再说“删除第几条”。"
 
 
 
@@ -990,7 +995,11 @@ def infer_delete_target_from_text(text: str, amount) -> str:
         return "reminder"
     if any(word in text for word in ("重要事项", "重要日期", "日期", "生日", "纪念日", "考试", "面试", "开学", "截止")):
         return "date"
-    if "待办" in text:
+    if any(word in text for word in ("每日任务", "每天任务", "日常任务", "每日目标", "每天目标", "打卡目标")):
+        return "task_any"
+    if "目标" in text:
+        return "goal"
+    if any(word in text for word in ("待办", "任务")):
         return "todo"
     if "预算" in text:
         return "budget"
@@ -1001,9 +1010,8 @@ def infer_delete_target_from_text(text: str, amount) -> str:
     if amount is not None:
         return "any"
     return "any"
-
-
 def clean_original_message_for_delete(text: str) -> str:
+    text = re.sub(r"(?:不要|不需要)(?:这个|这条|该)?", " ", text)
     text = re.sub(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2})", " ", text)
     text = re.sub(r"\d+(?:\.\d+)?\s*(?:元|块)?", " ", text)
     text = re.sub(r"(我|今天|今日|昨天|明天|后天|本月|这个月|这月|本周|这周|这个星期|要|了|的|把|这个|那个|这条|那条|设置|添加|新增|加入|记录|吃了)", " ", text)
@@ -1017,13 +1025,13 @@ def parse_record_line_for_delete(line: str) -> dict | None:
     target = infer_delete_target_from_text(line, amount)
     if time_match and target == "any":
         target = "reminder"
-    if not query and amount is None and not date:
+    if not query and amount is None and not date and target == "any":
         return None
     return {"type": "delete", "target": target, "date": date, "query": query, "amount": amount}
 
 def clean_delete_query(query: str) -> str:
     query = re.sub(r"(重\s*事项|重\s*日期)", "", query)
-    query = re.sub(r"(删除|删掉|去掉|撤销|取消|移除|关掉|关闭|取消掉|这条|该事项|这个事项|刚才那条|上一条|记录|提醒|闹钟|待办|预算|重要事项|重要日期|日期|已设好|已加入)", "", query)
+    query = re.sub(r"(删除|删掉|删去|去掉|撤销|撤回|取消|移除|作废|清除|清掉|抹掉|关掉|关闭|取消掉|不要了|不需要了|这条|该事项|这个事项|刚才那条|上一条|上一步|记录|提醒|闹钟|待办|每日任务|每天任务|日常任务|任务|每日目标|每天目标|目标|预算|重要事项|重要日期|日期|已设好|已加入)", "", query)
     query = re.sub(r"\s+", " ", query).strip(" ：:，,。-")
     return query
 
@@ -1108,6 +1116,8 @@ def record_kinds_for_target(target: str) -> list[str]:
     target = str(target or "any").lower()
     aliases = {"alarm": "reminder", "task": "todo", "important": "date", "important_date": "date", "dates": "date", "goals": "goal"}
     target = aliases.get(target, target)
+    if target in {"task_any", "unified_task", "daily_task"}:
+        return ["todo", "goal"]
     if target in specs:
         return [target]
     return ["expense", "income", "date", "note", "mood", "reminder", "todo", "budget", "goal"]
@@ -1153,7 +1163,7 @@ def find_target_record(request_data: dict) -> dict | None:
     query = clean_delete_query(str(request_data.get("query") or ""))
     amount = request_data.get("amount")
     quoted = bool(request_data.get("_quoted"))
-    recent_floor = (datetime.now().date() - timedelta(days=1)).isoformat() if quoted and not date else ""
+    recent_floor = ""
     best = None
     for kind in record_kinds_for_target(target):
         info = record_rows_info(kind)
@@ -1166,8 +1176,6 @@ def find_target_record(request_data: dict) -> dict | None:
                 if row_created and row_created < recent_floor:
                     continue
             score = delete_match_score(kind, row, main_field, date, query, amount)
-            if score < 0 and quoted and amount not in (None, "") and query:
-                score = delete_match_score(kind, row, main_field, date, "", amount)
             if score < 0:
                 continue
             created_at = row.get("created_at", "")
@@ -1419,6 +1427,26 @@ def resolve_recent_reference(index: int, chat_id: int | None) -> dict | None:
     return None
 
 
+def is_latest_undo_request(text: str) -> bool:
+    compact = re.sub(r"[\s，,。！!？?：:]", "", str(text or ""))
+    return compact in {
+        "撤销", "撤回", "回退", "撤销刚才", "撤回刚才", "撤销上一步", "回退上一步",
+        "撤销刚才的记录", "撤回刚才的记录", "取消刚才的记录", "删除刚才的记录",
+        "删掉刚才的记录", "删除上一条", "删掉上一条", "撤销上一条", "撤回上一条",
+        "清除上一条", "作废上一条", "取消上一条记录", "不要刚才那条了",
+        "清除这条记录", "删除这条记录", "删掉这条记录", "作废这条记录",
+        "取消这条记录", "不要这条记录了", "不要这个记录了", "删了它", "撤销它",
+    }
+
+
+def latest_record_reference(target: str = "any") -> dict | None:
+    allowed = set(record_kinds_for_target(target))
+    for entry in recent_entries(100):
+        if entry.get("kind") in allowed and entry.get("id"):
+            return entry
+    return None
+
+
 def local_delete_action(text: str, chat_id: int | None) -> dict | None:
     if not is_delete_request(text):
         return None
@@ -1428,9 +1456,12 @@ def local_delete_action(text: str, chat_id: int | None) -> dict | None:
         if not ref:
             return {"type": "answer", "answer": f"没找到最近记录第 {index} 条。你可以先发 /recent 再删。"}
         return {"type": "delete", "target": ref.get("kind", "any"), "id": ref.get("id", "")}
+    if is_latest_undo_request(text):
+        ref = latest_record_reference(infer_delete_target_from_text(text, None))
+        if not ref:
+            return {"type": "answer", "answer": "没有找到可以撤销的上一条记录。"}
+        return {"type": "delete", "target": ref.get("kind", "any"), "id": ref.get("id", "")}
     return parse_record_line_for_delete(text)
-
-
 def is_update_request(text: str) -> bool:
     return any(word in text for word in ("改成", "改为", "修改成", "修改为", "换成", "调到", "改到", "应该是", "不是"))
 
@@ -3130,19 +3161,26 @@ def combine_reply_parts(parts: list) -> str | dict:
     return "\n\n".join(messages) if messages else "没有识别到需要执行的内容。"
 
 
+def safe_user_reply_text(value) -> str:
+    text = str(value or "").strip()
+    if not text or re.fullmatch(r"[?？\s]{3,}", text):
+        return BUG_FALLBACK_MESSAGE
+    return text
+
+
 def send_reply(token: str, chat_id: int, reply) -> None:
     if isinstance(reply, dict) and reply.get("type") == "photo":
-        send_photo(token, chat_id, reply["photo"], reply.get("caption", ""))
+        caption = safe_user_reply_text(reply.get("caption", "")) if reply.get("caption") else ""
+        send_photo(token, chat_id, reply["photo"], caption)
         return
     if isinstance(reply, dict) and reply.get("type") == "multi":
         for message in reply.get("messages") or []:
-            send_message(token, chat_id, message)
+            send_message(token, chat_id, safe_user_reply_text(message))
         for photo in reply.get("photos") or []:
-            send_photo(token, chat_id, photo["photo"], photo.get("caption", ""))
+            caption = safe_user_reply_text(photo.get("caption", "")) if photo.get("caption") else ""
+            send_photo(token, chat_id, photo["photo"], caption)
         return
-    send_message(token, chat_id, str(reply))
-
-
+    send_message(token, chat_id, safe_user_reply_text(reply))
 def summary_period_from_text(text: str) -> str | None:
     summary_words = ("总结", "复盘", "回顾", "小结", "汇总", "报告")
     if text in {"/today", "今日总结", "今天总结", "今日复盘", "今天复盘", "今日回顾", "今天回顾"} or (any(word in text for word in summary_words) and any(word in text for word in ("今日", "今天", "本日"))):
@@ -3572,10 +3610,10 @@ def with_support_layer(reply, source_text: str, action_types: set[str] | None = 
     return (reply_text + "\n\n" + support).strip() if reply_text else support
 
 def is_delete_request(text: str) -> bool:
-    return any(word in text for word in DELETE_WORDS)
-
-
-
+    if any(word in text for word in DELETE_WORDS):
+        return True
+    compact = re.sub(r"\s+", "", str(text or ""))
+    return bool(re.search(r"(?:不要|不需要)(?:这个|这条|该)?(?:提醒|任务|待办|目标|记录)", compact))
 
 def is_weather_only_mood_context(text: str) -> bool:
     if not has_weather_hint(text):
@@ -4916,15 +4954,8 @@ def handle_text(config: dict, text: str, reply_context: str = "", chat_id: int |
     if tone_reply:
         return tone_reply
 
-    pending_result = handle_pending_confirmation_center(config, text, chat_id)
-    if pending_result:
-        return pending_result
-    update_action = local_update_action(text, chat_id)
-    if update_action:
-        if update_action.get("type") == "answer":
-            return update_action.get("answer", "")
-        return resolve_or_queue_record_action("update", update_action, chat_id)
-
+    # Record cancellation is a high-priority local action. It must run before
+    # pending confirmations and AI routing so reminders/tasks can be removed reliably.
     if is_delete_request(text):
         if reply_context:
             result = delete_from_reply_context(reply_context)
@@ -4936,6 +4967,14 @@ def handle_text(config: dict, text: str, reply_context: str = "", chat_id: int |
                 return parsed_delete.get("answer", "")
             return resolve_or_queue_record_action("delete", parsed_delete, chat_id)
 
+    pending_result = handle_pending_confirmation_center(config, text, chat_id)
+    if pending_result:
+        return pending_result
+    update_action = local_update_action(text, chat_id)
+    if update_action:
+        if update_action.get("type") == "answer":
+            return update_action.get("answer", "")
+        return resolve_or_queue_record_action("update", update_action, chat_id)
     routine_prompt = routine_confirmation_prompt(text, chat_id)
     if routine_prompt:
         parts = [routine_prompt]
@@ -5132,7 +5171,8 @@ def main() -> None:
                         reply = append_first_daily_notice(latest_state, chat_id, reply)
                     write_state(latest_state)
                 except Exception as exc:
-                    reply = f"处理失败：{exc}"
+                    print(f"Message handling error: {type(exc).__name__}: {exc}")
+                    reply = BUG_FALLBACK_MESSAGE
                 try:
                     send_reply(token, chat_id, reply)
                 except Exception as exc:

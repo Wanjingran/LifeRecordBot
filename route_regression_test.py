@@ -1028,14 +1028,72 @@ def assert_quote_delete_recent_cases(failures: list[str]) -> None:
         bot.append_csv(bot.EXPENSES_CSV, [bot.datetime.now().date().isoformat(), U(r"\u6c34"), "6", U(r"\u9910\u996e"), "", created_new, "new-water"])
         reply = bot.delete_from_reply_context(U(r"\u559d\u6c34 6\u5143"))
         rows = bot.read_csv_rows(bot.EXPENSES_CSV)
-        if not isinstance(reply, str) or "new-water" in [row.get("id") for row in rows] or "old-water" not in [row.get("id") for row in rows]:
-            failures.append(f"quote delete recent: reply={reply!r}, rows={rows!r}")
+        if not isinstance(reply, str) or "old-water" in [row.get("id") for row in rows] or "new-water" not in [row.get("id") for row in rows]:
+            failures.append(f"quote delete exact record: reply={reply!r}, rows={rows!r}")
         reply = bot.delete_from_reply_context(U(r"\u559d\u6c34 6\u5143"))
         rows = bot.read_csv_rows(bot.EXPENSES_CSV)
-        if not isinstance(reply, str) or "old-water" not in [row.get("id") for row in rows]:
-            failures.append(f"quote delete repeat should not remove old record: reply={reply!r}, rows={rows!r}")
+        if not isinstance(reply, str) or "new-water" not in [row.get("id") for row in rows] or "已删除" in reply:
+            failures.append(f"quote delete repeat should not remove similar record: reply={reply!r}, rows={rows!r}")
 
+def assert_undo_and_error_fallback_cases(failures: list[str]) -> None:
+    undo_words = ["撤销", "撤回上一条", "清除这条记录", "作废提醒", "删去待办", "不要这个任务了"]
+    for phrase in undo_words:
+        if not bot.is_delete_request(phrase):
+            failures.append(f"undo vocabulary not recognized: {phrase!r}")
 
+    if bot.safe_user_reply_text("????????") != bot.BUG_FALLBACK_MESSAGE:
+        failures.append("error fallback: question-mark reply was not replaced")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        retarget_data_paths(Path(tmp))
+        bot.ensure_files()
+        config = {"deepseek_api_key": "", "deepseek_model": "", "default_city": "深圳"}
+        old_created = "2026-07-01 08:00:00"
+        reminder_text = "【暑假学习·周一】Python 90分钟：一元/二元通用函数并做5个小例子"
+        bot.append_csv(bot.REMINDERS_CSV, [
+            "reminder-old-quote", "980", "2026-07-28 09:00:00", reminder_text,
+            "sent", old_created, "2026-07-28 09:00:01", "weekly",
+        ])
+        reply = bot.handle_text(config, "取消提醒", reply_context=f"提醒：{reminder_text}", chat_id=980)
+        rows = bot.read_csv_rows(bot.REMINDERS_CSV)
+        if not isinstance(reply, str) or "已删除" not in reply or any(row.get("id") == "reminder-old-quote" for row in rows):
+            failures.append(f"undo quoted old reminder: reply={reply!r}, rows={rows!r}")
+        if "?" in str(reply):
+            failures.append(f"undo quoted old reminder returned question marks: {reply!r}")
+
+        bot.append_csv(bot.GOALS_CSV, [
+            "goal-daily-python", "981", "学习Python", "python", "15", "minute",
+            "daily", "", "active", "2026-07-27 10:00:00",
+        ])
+        reply = bot.handle_text(config, "取消每日任务学习Python", chat_id=981)
+        goals = bot.read_csv_rows(bot.GOALS_CSV)
+        if not isinstance(reply, str) or "已删除" not in reply or any(row.get("id") == "goal-daily-python" for row in goals):
+            failures.append(f"undo daily task goal: reply={reply!r}, goals={goals!r}")
+
+        bot.append_csv(bot.TODOS_CSV, ["todo-homework", "交作业", "pending", "", "2026-07-27 11:00:00", ""])
+        reply = bot.handle_text(config, "清除待办交作业", chat_id=982)
+        todos = bot.read_csv_rows(bot.TODOS_CSV)
+        if not isinstance(reply, str) or "已删除" not in reply or any(row.get("id") == "todo-homework" for row in todos):
+            failures.append(f"undo todo wording: reply={reply!r}, todos={todos!r}")
+
+        bot.append_csv(bot.TODOS_CSV, ["todo-natural-cancel", "整理桌面", "pending", "", "2026-07-27 12:00:00", ""])
+        reply = bot.handle_text(config, "不要这个任务了", chat_id=982)
+        todos = bot.read_csv_rows(bot.TODOS_CSV)
+        if not isinstance(reply, str) or "已删除" not in reply or any(row.get("id") == "todo-natural-cancel" for row in todos):
+            failures.append(f"undo natural task wording: reply={reply!r}, todos={todos!r}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        retarget_data_paths(Path(tmp))
+        bot.ensure_files()
+        config = {"deepseek_api_key": "", "deepseek_model": "", "default_city": "深圳"}
+        bot.append_csv(bot.EXPENSES_CSV, ["2026-07-28", "早餐", "18", "餐饮", "", "2026-07-28 10:00:00", "undo-expense"])
+        bot.append_csv(bot.NOTES_CSV, ["2026-07-28", "完成测试", "2026-07-28 11:00:00", "undo-note"])
+        first = bot.handle_text(config, "清除这条记录", chat_id=983)
+        second = bot.handle_text(config, "撤回", chat_id=983)
+        if "已删除" not in str(first) or bot.read_csv_rows(bot.NOTES_CSV):
+            failures.append(f"continuous undo first record: first={first!r}, notes={bot.read_csv_rows(bot.NOTES_CSV)!r}")
+        if "已删除" not in str(second) or bot.read_csv_rows(bot.EXPENSES_CSV):
+            failures.append(f"continuous undo second record: second={second!r}, expenses={bot.read_csv_rows(bot.EXPENSES_CSV)!r}")
 def main() -> None:
     failures: list[str] = []
     assert_route_cases(failures)
@@ -1044,6 +1102,7 @@ def main() -> None:
     assert_expense_category_cases(failures)
     assert_food_transport_weather_budget_cases(failures)
     assert_quote_delete_recent_cases(failures)
+    assert_undo_and_error_fallback_cases(failures)
     assert_note_confirmation_cases(failures)
     assert_note_guard_cases(failures)
     assert_goal_tone_history_cases(failures)
@@ -1063,7 +1122,7 @@ def main() -> None:
         for failure in failures:
             print("- " + failure)
         raise SystemExit(1)
-    print(f"OK: {len(CASES)} route cases, {len(CITY_CASES)} city cases, {len(AUGMENT_CASES)} augment cases, {len(LOCAL_HANDLE_CASES)} local handle cases, expense category, food/transport/weather/budget, quote delete recent, note confirmation, note guard, goal/tone/history, important items, routine confirmation, unified tasks, bulk task completion, natural todo creation, support layer, record management, confirmation center, weather/mood boundary, answer filter, {len(MULTI_HANDLE_CASES)} multi handle cases")
+    print(f"OK: {len(CASES)} route cases, {len(CITY_CASES)} city cases, {len(AUGMENT_CASES)} augment cases, {len(LOCAL_HANDLE_CASES)} local handle cases, expense category, food/transport/weather/budget, quote delete recent, undo/error fallback, note confirmation, note guard, goal/tone/history, important items, routine confirmation, unified tasks, bulk task completion, natural todo creation, support layer, record management, confirmation center, weather/mood boundary, answer filter, {len(MULTI_HANDLE_CASES)} multi handle cases")
 
 
 if __name__ == "__main__":
