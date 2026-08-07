@@ -1020,15 +1020,18 @@ def clean_original_message_for_delete(text: str) -> str:
 def parse_record_line_for_delete(line: str) -> dict | None:
     date = infer_delete_date_from_text(line)
     time_match = re.search(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", line)
-    amount = infer_amount_from_text(line)
+    target = infer_delete_target_from_text(line, None)
+    # Reminders/tasks often contain durations or words such as "花式索引".
+    # Those numbers are not money and must never participate in delete matching.
+    amount = infer_amount_from_text(line) if target in {"any", "income", "budget"} else None
+    if target == "any":
+        target = infer_delete_target_from_text(line, amount)
     query = clean_original_message_for_delete(line)
-    target = infer_delete_target_from_text(line, amount)
     if time_match and target == "any":
         target = "reminder"
     if not query and amount is None and not date and target == "any":
         return None
     return {"type": "delete", "target": target, "date": date, "query": query, "amount": amount}
-
 def clean_delete_query(query: str) -> str:
     query = re.sub(r"(重\s*事项|重\s*日期)", "", query)
     query = re.sub(r"(删除|删掉|删去|去掉|撤销|撤回|取消|移除|作废|清除|清掉|抹掉|关掉|关闭|取消掉|不要了|不需要了|这条|该事项|这个事项|刚才那条|上一条|上一步|记录|提醒|闹钟|待办|每日任务|每天任务|日常任务|任务|每日目标|每天目标|目标|预算|重要事项|重要日期|日期|已设好|已加入)", "", query)

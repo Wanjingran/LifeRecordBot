@@ -389,8 +389,9 @@ def assert_goal_tone_history_cases(failures: list[str]) -> None:
             if not isinstance(reply, str) or "10/15" not in reply:
                 failures.append(f"goal status: unexpected reply {reply!r}")
 
-            bot.append_csv(bot.EXPENSES_CSV, ["2026-07-05", "\u65e9\u9910", 20, "\u9910\u996e", "", "2026-07-05 08:00:00"])
-            bot.append_csv(bot.EXPENSES_CSV, ["2026-07-05", "\u6e38\u620f", 30, "\u5a31\u4e50", "", "2026-07-05 09:00:00"])
+            today = bot.datetime.now().date().isoformat()
+            bot.append_csv(bot.EXPENSES_CSV, [today, "\u65e9\u9910", 20, "\u9910\u996e", "", f"{today} 08:00:00"])
+            bot.append_csv(bot.EXPENSES_CSV, [today, "\u6e38\u620f", 30, "\u5a31\u4e50", "", f"{today} 09:00:00"])
             reply = bot.handle_text(config, U(r"\u6211\u6700\u8fd1\u94b1\u82b1\u54ea\u4e86"), chat_id=200)
             if not isinstance(reply, str) or "\u9910\u996e" not in reply or "\u5a31\u4e50" not in reply:
                 failures.append(f"history spend: unexpected reply {reply!r}")
@@ -1049,18 +1050,30 @@ def assert_undo_and_error_fallback_cases(failures: list[str]) -> None:
         bot.ensure_files()
         config = {"deepseek_api_key": "", "deepseek_model": "", "default_city": "深圳"}
         old_created = "2026-07-01 08:00:00"
-        reminder_text = "【暑假学习·周一】Python 90分钟：一元/二元通用函数并做5个小例子"
+        thursday_text = "【暑假学习·周四】Python 90分钟：NumPy本章综合练习；Java DSA 60分钟：实现二分查找并解释为什么是 O(log n)"
+        friday_text = "【暑假学习·周五】本周验收：Python完成一个Notebook，包含筛选、花式索引、转置、通用函数和统计；Java完成LinearSearch.java与BinarySearch.java；用30分钟列出不会的3个点。总量最多4小时。"
         bot.append_csv(bot.REMINDERS_CSV, [
-            "reminder-old-quote", "980", "2026-07-28 09:00:00", reminder_text,
-            "sent", old_created, "2026-07-28 09:00:01", "weekly",
+            "reminder-thursday", "980", "2026-08-13 09:00:00", thursday_text,
+            "pending", old_created, "2026-08-06 19:36:00", "weekly",
         ])
-        reply = bot.handle_text(config, "取消提醒", reply_context=f"提醒：{reminder_text}", chat_id=980)
-        rows = bot.read_csv_rows(bot.REMINDERS_CSV)
-        if not isinstance(reply, str) or "已删除" not in reply or any(row.get("id") == "reminder-old-quote" for row in rows):
-            failures.append(f"undo quoted old reminder: reply={reply!r}, rows={rows!r}")
-        if "?" in str(reply):
-            failures.append(f"undo quoted old reminder returned question marks: {reply!r}")
+        bot.append_csv(bot.REMINDERS_CSV, [
+            "reminder-friday", "980", "2026-08-14 09:00:00", friday_text,
+            "pending", old_created, "2026-08-07 19:36:00", "weekly",
+        ])
+        first_reply = bot.handle_text(config, "撤销该提醒", reply_context=f"提醒：{thursday_text}", chat_id=980)
+        first_rows = bot.read_csv_rows(bot.REMINDERS_CSV)
+        if not isinstance(first_reply, str) or "已删除" not in first_reply or any(row.get("id") == "reminder-thursday" for row in first_rows) or not any(row.get("id") == "reminder-friday" for row in first_rows):
+            failures.append(f"continuous quoted reminder first delete: reply={first_reply!r}, rows={first_rows!r}")
 
+        parsed_friday = bot.parse_record_line_for_delete(f"提醒：{friday_text}")
+        if not parsed_friday or parsed_friday.get("amount") is not None:
+            failures.append(f"reminder duration parsed as money: {parsed_friday!r}")
+        second_reply = bot.handle_text(config, "撤销该提醒", reply_context=f"提醒：{friday_text}", chat_id=980)
+        second_rows = bot.read_csv_rows(bot.REMINDERS_CSV)
+        if not isinstance(second_reply, str) or "已删除" not in second_reply or any(row.get("id") == "reminder-friday" for row in second_rows):
+            failures.append(f"continuous quoted reminder second delete: reply={second_reply!r}, rows={second_rows!r}")
+        if "?" in str(first_reply) or "?" in str(second_reply):
+            failures.append(f"continuous quoted reminders returned question marks: first={first_reply!r}, second={second_reply!r}")
         bot.append_csv(bot.GOALS_CSV, [
             "goal-daily-python", "981", "学习Python", "python", "15", "minute",
             "daily", "", "active", "2026-07-27 10:00:00",
