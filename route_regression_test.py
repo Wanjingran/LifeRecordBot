@@ -960,11 +960,14 @@ def assert_food_transport_weather_budget_cases(failures: list[str]) -> None:
     food_cases = [
         U(r"\u51b0\u6dc7\u6dcb"), U(r"\u51b0\u6dc7\u51cc"), U(r"\u51b0\u6fc0\u51cc"),
         U(r"\u559d\u6c34"), U(r"\u4e70\u6c34"), U(r"\u6c34"), U(r"\u996e\u54c1"),
+        U(r"\u5c0f\u5403"), U(r"\u96f6\u98df"), U(r"\u85af\u7247"), U(r"\u997c\u5e72"), U(r"\u7cd6\u679c"), U(r"\u575a\u679c"),
     ]
     for item in food_cases:
         actual = bot.normalize_expense_category(item, U(r"\u5176\u4ed6"))
         if actual != U(r"\u9910\u996e"):
             failures.append(f"food category expanded: {item!r} -> {actual!r}")
+    if bot.normalize_expense_category(U(r"\u96f6\u98df"), U(r"\u8d2d\u7269")) != U(r"\u9910\u996e"):
+        failures.append("food category: explicit food should override an incorrect shopping category")
     traffic_cases = [U(r"\u5750\u5730\u94c1"), U(r"\u5750\u516c\u4ea4"), U(r"\u5927\u5df4")]
     for item in traffic_cases:
         actual = bot.normalize_expense_category(item, U(r"\u5176\u4ed6"))
