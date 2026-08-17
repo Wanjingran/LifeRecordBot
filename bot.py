@@ -936,8 +936,30 @@ def delete_record(request_data: dict) -> str:
     index = info["index"]
     kind = info["kind"]
     removed = rows.pop(index)
-    write_csv_rows(info["path"], info["fieldnames"], rows)
     extra = ""
+    if kind == "reminder":
+        repeat = normalize_repeat(removed.get("repeat"))
+        if repeat in {"daily", "weekly", "monthly", "yearly"}:
+            series_text = re.sub(r"\s+", "", str(removed.get("text") or ""))
+            series_chat_id = str(removed.get("chat_id") or "")
+            kept = []
+            duplicates = 0
+            for row in rows:
+                same_series = (
+                    normalize_repeat(row.get("repeat")) == repeat
+                    and str(row.get("chat_id") or "") == series_chat_id
+                    and re.sub(r"\s+", "", str(row.get("text") or "")) == series_text
+                )
+                if same_series:
+                    duplicates += 1
+                    continue
+                kept.append(row)
+            rows = kept
+            repeat_name = {"daily": "每日", "weekly": "每周", "monthly": "每月", "yearly": "每年"}[repeat]
+            extra = f"\n已取消整个{repeat_name}提醒，之后不会再次触发。"
+            if duplicates:
+                extra += f"同时清理重复规则 {duplicates} 条。"
+    write_csv_rows(info["path"], info["fieldnames"], rows)
     if kind == "date":
         linked = delete_linked_reminders_for_date(removed)
         if linked:
@@ -1023,6 +1045,8 @@ def parse_record_line_for_delete(line: str) -> dict | None:
     date = infer_delete_date_from_text(line)
     time_match = re.search(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", line)
     target = infer_delete_target_from_text(line, None)
+    if target == "reminder" and not time_match:
+        date = ""
     # Reminders/tasks often contain durations or words such as "花式索引".
     # Those numbers are not money and must never participate in delete matching.
     amount = infer_amount_from_text(line) if target in {"any", "income", "budget"} else None

@@ -1063,6 +1063,10 @@ def assert_undo_and_error_fallback_cases(failures: list[str]) -> None:
             "reminder-friday", "980", "2026-08-14 09:00:00", friday_text,
             "pending", old_created, "2026-08-07 19:36:00", "weekly",
         ])
+        bot.append_csv(bot.REMINDERS_CSV, [
+            "reminder-friday-duplicate", "980", "2026-08-21 09:00:00", friday_text,
+            "pending", old_created, "", "weekly",
+        ])
         first_reply = bot.handle_text(config, "撤销该提醒", reply_context=f"提醒：{thursday_text}", chat_id=980)
         first_rows = bot.read_csv_rows(bot.REMINDERS_CSV)
         if not isinstance(first_reply, str) or "已删除" not in first_reply or any(row.get("id") == "reminder-thursday" for row in first_rows) or not any(row.get("id") == "reminder-friday" for row in first_rows):
@@ -1073,10 +1077,18 @@ def assert_undo_and_error_fallback_cases(failures: list[str]) -> None:
             failures.append(f"reminder duration parsed as money: {parsed_friday!r}")
         second_reply = bot.handle_text(config, "撤销该提醒", reply_context=f"提醒：{friday_text}", chat_id=980)
         second_rows = bot.read_csv_rows(bot.REMINDERS_CSV)
-        if not isinstance(second_reply, str) or "已删除" not in second_reply or any(row.get("id") == "reminder-friday" for row in second_rows):
+        if not isinstance(second_reply, str) or "已删除" not in second_reply or "整个每周提醒" not in second_reply or any(row.get("id") in {"reminder-friday", "reminder-friday-duplicate"} for row in second_rows):
             failures.append(f"continuous quoted reminder second delete: reply={second_reply!r}, rows={second_rows!r}")
         if "?" in str(first_reply) or "?" in str(second_reply):
             failures.append(f"continuous quoted reminders returned question marks: first={first_reply!r}, second={second_reply!r}")
+
+        daily_text = "每天晚上十点复盘今天的学习"
+        for record_id, remind_at in (("daily-one", "2026-08-15 22:00:00"), ("daily-two", "2026-08-16 22:00:00")):
+            bot.append_csv(bot.REMINDERS_CSV, [record_id, "980", remind_at, daily_text, "pending", old_created, "", "daily"])
+        daily_reply = bot.handle_text(config, "删除这个提醒", reply_context=f"提醒：{daily_text}", chat_id=980)
+        daily_rows = bot.read_csv_rows(bot.REMINDERS_CSV)
+        if "整个每日提醒" not in str(daily_reply) or any(row.get("id") in {"daily-one", "daily-two"} for row in daily_rows):
+            failures.append(f"quoted daily reminder series delete: reply={daily_reply!r}, rows={daily_rows!r}")
         bot.append_csv(bot.GOALS_CSV, [
             "goal-daily-python", "981", "学习Python", "python", "15", "minute",
             "daily", "", "active", "2026-07-27 10:00:00",
