@@ -1122,6 +1122,55 @@ def assert_undo_and_error_fallback_cases(failures: list[str]) -> None:
             failures.append(f"continuous undo first record: first={first!r}, notes={bot.read_csv_rows(bot.NOTES_CSV)!r}")
         if "已删除" not in str(second) or bot.read_csv_rows(bot.EXPENSES_CSV):
             failures.append(f"continuous undo second record: second={second!r}, expenses={bot.read_csv_rows(bot.EXPENSES_CSV)!r}")
+
+
+def assert_incomplete_expense_confirmation_cases(failures: list[str]) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        retarget_data_paths(Path(tmp))
+        bot.ensure_files()
+        original_call_deepseek = bot.call_deepseek
+
+        def fail_call_deepseek(*_args, **_kwargs):
+            raise AssertionError("incomplete expense case unexpectedly called DeepSeek")
+
+        bot.call_deepseek = fail_call_deepseek
+        try:
+            config = {"deepseek_api_key": "", "deepseek_model": "", "default_city": "深圳"}
+            reply = bot.handle_text(config, "八月十号夸克 app 续费", chat_id=990)
+            if not isinstance(reply, str) or "缺金额" not in reply or "2026-08-10" not in reply or "娱乐" not in reply:
+                failures.append(f"incomplete expense prompt: unexpected reply {reply!r}")
+            if bot.read_csv_rows(bot.EXPENSES_CSV):
+                failures.append("incomplete expense prompt: expense was saved before amount reply")
+
+            reply = bot.handle_text(config, "20块", chat_id=990)
+            rows = bot.read_csv_rows(bot.EXPENSES_CSV)
+            saved = rows[-1] if rows else {}
+            if not isinstance(reply, str) or "已记录消费" not in reply:
+                failures.append(f"incomplete expense amount: unexpected reply {reply!r}")
+            if saved.get("date") != "2026-08-10" or "夸克" not in saved.get("item", "") or saved.get("amount") != "20.0" or saved.get("category") != "娱乐":
+                failures.append(f"incomplete expense amount: wrong saved row {saved!r}")
+
+            before = len(rows)
+            reply = bot.handle_text(config, "8月11号视频会员续费", chat_id=991)
+            if not isinstance(reply, str) or "缺金额" not in reply or "2026-08-11" not in reply:
+                failures.append(f"incomplete numeric date prompt: unexpected reply {reply!r}")
+            reply = bot.handle_text(config, "不记", chat_id=991)
+            if "这笔不记" not in str(reply) or row_count(bot.EXPENSES_CSV) != before:
+                failures.append(f"incomplete expense cancel: reply={reply!r}, rows={bot.read_csv_rows(bot.EXPENSES_CSV)!r}")
+
+            reply = bot.handle_text(config, "8月12号夸克会员续费30元", chat_id=992)
+            rows = bot.read_csv_rows(bot.EXPENSES_CSV)
+            saved = rows[-1] if rows else {}
+            if "已记录消费" not in str(reply) or saved.get("date") != "2026-08-12" or saved.get("amount") != "30.0":
+                failures.append(f"complete expense with numeric date: reply={reply!r}, row={saved!r}")
+
+            if bot.incomplete_expense_candidate("夸克会员怎么续费") is not None:
+                failures.append("incomplete expense guard: question should not request an amount")
+            if bot.incomplete_expense_candidate("我今天很开心") is not None:
+                failures.append("incomplete expense guard: ordinary chat should not request an amount")
+        finally:
+            bot.call_deepseek = original_call_deepseek
+
 def main() -> None:
     failures: list[str] = []
     assert_route_cases(failures)
@@ -1131,6 +1180,7 @@ def main() -> None:
     assert_food_transport_weather_budget_cases(failures)
     assert_quote_delete_recent_cases(failures)
     assert_undo_and_error_fallback_cases(failures)
+    assert_incomplete_expense_confirmation_cases(failures)
     assert_note_confirmation_cases(failures)
     assert_note_guard_cases(failures)
     assert_goal_tone_history_cases(failures)

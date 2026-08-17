@@ -3452,6 +3452,19 @@ def has_amount(text: str) -> bool:
     return bool(re.search(r"\d+(?:\.\d+)?", text))
 
 
+def expense_amount_match(text: str) -> re.Match | None:
+    """Find a monetary amount without treating dates or clock times as money."""
+    for match in re.finditer(r"(\d+(?:\.\d+)?)\s*(?:元|块|rmb|RMB)?", text):
+        tail = text[match.end():]
+        head = text[:match.start()]
+        if re.match(r"\s*(?:年|月|日|号|点|时|分)", tail):
+            continue
+        if re.search(r"(?:年|月|日|号|点|时|分|[-/.])\s*$", head):
+            continue
+        return match
+    return None
+
+
 def has_time_expression(text: str) -> bool:
     if re.search(r"\d{1,2}\s*[点:]|[一二两三四五六七八九十半]\s*点", text):
         return True
@@ -3477,7 +3490,7 @@ def has_expense_hint(text: str) -> bool:
         "外卖", "电影", "游戏", "网吧", "网咖", "房租", "水电", "话费",
     )
     income_words = ("收入", "工资", "兼职", "赚", "到账", "入账", "红包", "报销", "收款", "生活费", "奖学金", "补贴")
-    if not has_amount(text) or not any(word in text for word in expense_words):
+    if not expense_amount_match(text) or not any(word in text for word in expense_words):
         return False
     return not (any(word in text for word in income_words) and not any(word in text for word in ("花", "买", "消费", "支出", "打车", "早餐", "午饭", "晚饭", "充值", "续费")))
 
@@ -4060,6 +4073,40 @@ def local_record_date(text: str) -> str:
     return day.isoformat()
 
 
+def expense_record_date(text: str) -> str:
+    """Parse an expense date in the current year; past dates stay in the past."""
+    relative = local_record_date(text)
+    if any(word in text for word in ("今天", "今日", "昨天", "前天", "明天")):
+        return relative
+    today = datetime.now().date()
+    match = re.search(r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})(?:日|号)?", text)
+    if match:
+        try:
+            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3))).date().isoformat()
+        except ValueError:
+            return relative
+    match = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|号)", text)
+    if not match:
+        match = re.search(r"([一二两三四五六七八九十]{1,3})\s*月\s*([一二两三四五六七八九十]{1,3})\s*(?:日|号)", text)
+    if match:
+        month = chinese_number_to_int(match.group(1))
+        day = chinese_number_to_int(match.group(2))
+        if month and day:
+            try:
+                return datetime(today.year, month, day).date().isoformat()
+            except ValueError:
+                return relative
+    return relative
+
+
+def strip_expense_date_noise(text: str) -> str:
+    text = re.sub(r"\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}(?:日|号)?", "", text)
+    text = re.sub(r"\d{1,2}\s*月\s*\d{1,2}\s*(?:日|号)", "", text)
+    text = re.sub(r"[一二两三四五六七八九十]{1,3}\s*月\s*[一二两三四五六七八九十]{1,3}\s*(?:日|号)", "", text)
+    text = re.sub(r"(今天|今日|昨天|前天|明天|刚刚|刚才)", "", text)
+    return text.strip(" ：:，,。？?的了")
+
+
 def strip_record_noise(text: str) -> str:
     text = re.sub(r"(今天|今日|昨天|前天|明天|刚刚|刚才|早上|上午|中午|下午|晚上|今晚|凌晨)", "", text)
     text = re.sub(r"(我|花了|花掉|花|买了|买|消费|支出|支付|付款|开销|用了|用掉|吃了|吃|喝了|喝|充值了|充值|开销)", "", text)
@@ -4074,7 +4121,7 @@ def strip_income_noise(text: str) -> str:
 def local_simple_expense_parse(text: str) -> dict | None:
     if has_multi_intent_hint(text) or not has_expense_hint(text):
         return None
-    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:元|块|rmb|RMB)?", text)
+    match = expense_amount_match(text)
     if not match:
         return None
     amount = safe_amount(match.group(1))
@@ -4082,11 +4129,11 @@ def local_simple_expense_parse(text: str) -> dict | None:
         return None
     before = text[:match.start()]
     after = text[match.end():]
-    name = strip_record_noise(before) or strip_record_noise(after) or "消费"
+    name = strip_record_noise(strip_expense_date_noise(before)) or strip_record_noise(strip_expense_date_noise(after)) or "消费"
     if len(name) > 30:
         name = name[-30:]
     category = normalize_expense_category(name, "其他")
-    return {"type": "expense", "items": [{"date": local_record_date(text), "name": name, "amount": amount, "category": category, "note": ""}]}
+    return {"type": "expense", "items": [{"date": expense_record_date(text), "name": name, "amount": amount, "category": category, "note": ""}]}
 
 
 def local_simple_income_parse(text: str) -> dict | None:
@@ -4875,6 +4922,90 @@ def clear_pending_center(state: dict, chat_id: int | None, kind: str | None = No
         store.pop(str(chat_id), None)
 
 
+def pending_expense_store(state: dict) -> dict:
+    return state.setdefault("pending_expense_amounts", {})
+
+
+def incomplete_expense_candidate(text: str) -> dict | None:
+    stripped = text.strip()
+    strong_words = ("续费", "充值", "扣费", "付款", "支付", "消费", "开销", "支出", "购买", "买了", "订阅", "会员")
+    blocked_words = ("提醒", "待办", "任务", "天气", "下雨", "收入", "工资", "报销", "红包", "到账", "入账")
+    if expense_amount_match(stripped) or is_question_like(stripped):
+        return None
+    if not any(word in stripped for word in strong_words) or any(word in stripped for word in blocked_words):
+        return None
+    if is_delete_request(stripped) or has_event_hint(stripped) or has_study_plan_hint(stripped):
+        return None
+    name = strip_expense_date_noise(stripped)
+    if not name or len(name) > 40:
+        return None
+    return {
+        "date": expense_record_date(stripped),
+        "name": name,
+        "category": normalize_expense_category(name, "其他"),
+    }
+
+
+def queue_pending_expense_amount(candidate: dict, chat_id: int | None) -> str:
+    if chat_id is None:
+        return "这句像一笔消费，但还缺金额。请补充金额，例如：夸克 app 续费 20 元。"
+    state = read_state()
+    pending_expense_store(state)[str(chat_id)] = {
+        **candidate,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    set_pending_center(state, chat_id, "expense_amount")
+    write_state(state)
+    return (
+        "这句像一笔消费，但还缺金额：\n"
+        f"- {candidate.get('date', '')} {candidate.get('name', '')} [{candidate.get('category', '其他')}]\n"
+        "直接回复金额，例如“20块”；回复“不记”取消。"
+    )
+
+
+def handle_pending_expense_amount(text: str, chat_id: int | None) -> str | None:
+    if chat_id is None:
+        return None
+    state = read_state()
+    key = str(chat_id)
+    store = pending_expense_store(state)
+    item = store.get(key)
+    if not item:
+        return None
+    try:
+        created_at = datetime.strptime(item.get("created_at", ""), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        created_at = datetime.now()
+    if datetime.now() - created_at > timedelta(minutes=30):
+        store.pop(key, None)
+        clear_pending_center(state, chat_id, "expense_amount")
+        write_state(state)
+        return None
+    if confirmation_intent(text).get("cancel") or text.strip() in {"取消记录", "先不记", "不要记"}:
+        store.pop(key, None)
+        clear_pending_center(state, chat_id, "expense_amount")
+        write_state(state)
+        return "好，这笔不记。"
+    amount_reply = re.fullmatch(r"\s*(?:金额\s*)?(\d+(?:\.\d+)?)\s*(?:元|块|rmb|RMB)?\s*", text)
+    if not amount_reply:
+        if confirmation_intent(text).get("confirm"):
+            return "还差金额，直接回复例如“20块”。"
+        return None
+    amount = safe_amount(amount_reply.group(1))
+    if amount <= 0:
+        return "金额需要大于 0，请重新发一个金额。"
+    store.pop(key, None)
+    clear_pending_center(state, chat_id, "expense_amount")
+    write_state(state)
+    return save_parsed({"type": "expense", "items": [{
+        "date": item.get("date") or datetime.now().date().isoformat(),
+        "name": item.get("name") or "消费",
+        "amount": amount,
+        "category": item.get("category") or "其他",
+        "note": "",
+    }]})
+
+
 def chinese_index_to_int(text: str) -> int | None:
     text = str(text or "").strip()
     aliases = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10, "第一个": 1, "第一个吧": 1, "第一个就行": 1, "第二个": 2, "第三个": 3}
@@ -4924,6 +5055,8 @@ def active_pending_confirmation_kind(state: dict, chat_id: int | None) -> str | 
             return kind
         if kind == "record_action" and pending_record_action_store(state).get(key):
             return kind
+        if kind == "expense_amount" and pending_expense_store(state).get(key):
+            return kind
     if note_pending_store(state).get(key):
         return "note"
     if pending_task_store(state).get(key):
@@ -4932,6 +5065,8 @@ def active_pending_confirmation_kind(state: dict, chat_id: int | None) -> str | 
         return "routine"
     if pending_record_action_store(state).get(key):
         return "record_action"
+    if pending_expense_store(state).get(key):
+        return "expense_amount"
     return None
 
 
@@ -4972,6 +5107,8 @@ def handle_pending_confirmation_center(config: dict, text: str, chat_id: int | N
         return None
     if kind == "record_action":
         return handle_pending_record_action(text, chat_id, intent)
+    if kind == "expense_amount":
+        return handle_pending_expense_amount(text, chat_id)
     return None
 
 def handle_text(config: dict, text: str, reply_context: str = "", chat_id: int | None = None) -> str | dict:
@@ -5106,6 +5243,9 @@ def handle_text(config: dict, text: str, reply_context: str = "", chat_id: int |
         local_record = local_simple_income_parse(text) or local_simple_expense_parse(text)
         if local_record:
             return save_parsed(local_record)
+        incomplete_expense = incomplete_expense_candidate(text)
+        if incomplete_expense:
+            return queue_pending_expense_amount(incomplete_expense, chat_id)
     if text.startswith("/mood"):
         content = text.replace("/mood", "", 1).strip()
         if not content:
