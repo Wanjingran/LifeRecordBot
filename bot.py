@@ -484,7 +484,7 @@ def normalize_expense_category(name: str, category: str) -> str:
     rules = [
         ("餐饮", ("早餐", "早饭", "早点", "午饭", "午餐", "中饭", "晚饭", "晚餐", "夜宵", "宵夜", "外卖", "奶茶", "咖啡", "冰淇淋", "冰淇凌", "冰激凌", "雪糕", "甜品", "小吃", "零食", "薯片", "饼干", "糖果", "坚果", "辣条", "喝水", "买水", "水", "饮品", "饮料", "可乐", "矿泉水", "纯净水", "瓶装水", "汉堡", "炸鸡", "烧烤", "火锅", "麻辣烫", "包子", "饺子", "水果", "食堂", "餐厅", "饭店", "饭", "餐", "面", "粉", "粥")),
         ("交通", ("打车", "出租", "网约车", "滴滴", "坐地铁", "地铁", "坐公交", "公交", "公交车", "巴士", "大巴", "高铁", "火车", "机票", "车票", "停车", "过路费", "油费", "共享单车", "骑行")),
-        ("娱乐", ("qq音乐", "QQ音乐", "音乐", "网吧", "网咖", "游戏", "会员", "电影", "续费", "演唱会", "剧本杀", "KTV", "ktv")),
+        ("娱乐", ("qq音乐", "QQ音乐", "音乐", "网吧", "网咖", "游戏", "会员", "电影", "续费", "健身", "游泳", "演唱会", "剧本杀", "KTV", "ktv")),
         ("购物", ("淘宝", "京东", "拼多多", "超市", "买", "衣服", "鞋", "雨伞", "伞", "日用品", "快递", "礼物")),
         ("居住", ("房租", "水电", "物业", "宽带", "燃气", "电费", "水费")),
         ("医疗", ("医院", "药", "挂号", "体检", "牙", "诊所")),
@@ -3453,13 +3453,19 @@ def has_amount(text: str) -> bool:
 
 
 def expense_amount_match(text: str) -> re.Match | None:
-    """Find a monetary amount without treating dates or clock times as money."""
+    """Find a monetary amount without treating dates, times, or quantities as money."""
+    date_spans = [
+        match.span()
+        for match in re.finditer(
+            r"\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}(?:日|号)?|\d{1,2}\s*月\s*\d{1,2}\s*(?:日|号)?|\d{1,2}[-/.]\d{1,2}",
+            text,
+        )
+    ]
     for match in re.finditer(r"(\d+(?:\.\d+)?)\s*(?:元|块|rmb|RMB)?", text):
-        tail = text[match.end():]
-        head = text[:match.start()]
-        if re.match(r"\s*(?:年|月|日|号|点|时|分)", tail):
+        if any(match.start() < end and match.end() > start for start, end in date_spans):
             continue
-        if re.search(r"(?:年|月|日|号|点|时|分|[-/.])\s*$", head):
+        tail = text[match.end():]
+        if re.match(r"\s*(?:年|月|日|号|点|时|分钟|分|小时|次|个|组|公里|km|kg|公斤)", tail, re.I):
             continue
         return match
     return None
@@ -3487,7 +3493,7 @@ def has_expense_hint(text: str) -> bool:
     expense_words = (
         "早餐", "午饭", "午餐", "晚饭", "晚餐", "夜宵", "奶茶", "咖啡", "打车", "地铁", "公交",
         "充值", "续费", "买", "花", "消费", "开销", "支出", "支付", "付款", "扣费", "花了", "花掉", "元", "块",
-        "外卖", "电影", "游戏", "网吧", "网咖", "房租", "水电", "话费",
+        "外卖", "电影", "游戏", "网吧", "网咖", "健身", "游泳", "洗衣服", "洗衣", "房租", "水电", "话费",
     )
     income_words = ("收入", "工资", "兼职", "赚", "到账", "入账", "红包", "报销", "收款", "生活费", "奖学金", "补贴")
     if not expense_amount_match(text) or not any(word in text for word in expense_words):
@@ -4926,11 +4932,117 @@ def pending_expense_store(state: dict) -> dict:
     return state.setdefault("pending_expense_amounts", {})
 
 
+
+def pending_expense_or_time_store(state: dict) -> dict:
+    return state.setdefault("pending_expense_or_time", {})
+
+
+def explicit_currency_amount(text: str) -> bool:
+    return bool(re.search(r"\d+(?:\.\d+)?\s*(?:元|块|rmb|RMB)", text))
+
+
+def ambiguous_expense_or_time_candidate(text: str) -> dict | None:
+    stripped = text.strip()
+    services = ("健身", "游泳", "洗衣服", "洗衣", "理发", "按摩", "维修", "打印")
+    if not any(word in stripped for word in services):
+        return None
+    if explicit_currency_amount(stripped) or is_question_like(stripped) or is_delete_request(stripped):
+        return None
+    if any(word in stripped for word in ("提醒", "闹钟", "通知", "叫我", "待办", "任务")) or parse_clock_from_text(stripped):
+        return None
+    match = expense_amount_match(stripped)
+    if not match or "." in match.group(1):
+        return None
+    amount = safe_amount(match.group(1))
+    if amount < 1 or amount > 23:
+        return None
+    before = strip_record_noise(strip_expense_date_noise(stripped[:match.start()]))
+    after = strip_record_noise(strip_expense_date_noise(stripped[match.end():]))
+    name = after or before
+    if not name or not any(word in name for word in services) or len(name) > 30:
+        return None
+    day = expense_record_date(stripped)
+    return {
+        "date": day,
+        "name": name,
+        "amount": amount,
+        "category": normalize_expense_category(name, "其他"),
+        "remind_at": f"{day} {int(amount):02d}:00:00",
+    }
+
+
+def queue_pending_expense_or_time(candidate: dict, chat_id: int | None) -> str:
+    if chat_id is None:
+        return "这句话里的数字既可能是金额，也可能是时间。请补充“块”或“点”。"
+    state = read_state()
+    pending_expense_or_time_store(state)[str(chat_id)] = {
+        **candidate,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    set_pending_center(state, chat_id, "expense_or_time")
+    write_state(state)
+    return (
+        "这句话有两种可能：\n"
+        f"1. 记账：{candidate['date']} {candidate['name']} {candidate['amount']:g} 元 [{candidate['category']}]\n"
+        f"2. 提醒：{candidate['remind_at']} {candidate['name']}\n"
+        "回复“记账”或“提醒”；回复“不用”取消。"
+    )
+
+
+def handle_pending_expense_or_time(text: str, chat_id: int | None) -> str | None:
+    if chat_id is None:
+        return None
+    state = read_state()
+    key = str(chat_id)
+    store = pending_expense_or_time_store(state)
+    item = store.get(key)
+    if not item:
+        return None
+    try:
+        created_at = datetime.strptime(item.get("created_at", ""), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        created_at = datetime.now()
+    if datetime.now() - created_at > timedelta(minutes=30):
+        store.pop(key, None)
+        clear_pending_center(state, chat_id, "expense_or_time")
+        write_state(state)
+        return None
+    stripped = text.strip()
+    if confirmation_intent(stripped).get("cancel"):
+        store.pop(key, None)
+        clear_pending_center(state, chat_id, "expense_or_time")
+        write_state(state)
+        return "好，这条不处理。"
+    expense_choices = {"1", "记账", "消费", "记录消费", "按消费", "金额"}
+    reminder_choices = {"2", "提醒", "设置提醒", "按时间", "时间", "闹钟"}
+    if stripped not in expense_choices and stripped not in reminder_choices:
+        return None
+    store.pop(key, None)
+    clear_pending_center(state, chat_id, "expense_or_time")
+    write_state(state)
+    if stripped in expense_choices:
+        return save_parsed({"type": "expense", "items": [{
+            "date": item.get("date"), "name": item.get("name"),
+            "amount": item.get("amount"), "category": item.get("category"), "note": "",
+        }]})
+    try:
+        remind_at = datetime.strptime(item.get("remind_at", ""), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return "提醒时间解析失败，请补充明确时间，例如“明天10点提醒我健身”。"
+    if remind_at <= datetime.now():
+        return "这个提醒时间已经过去了，请补充新的日期或时间。"
+    return save_reminder({"type": "reminder", "items": [{
+        "remind_at": item.get("remind_at"), "text": item.get("name"), "repeat": "none",
+    }]}, chat_id)
 def incomplete_expense_candidate(text: str) -> dict | None:
     stripped = text.strip()
-    strong_words = ("续费", "充值", "扣费", "付款", "支付", "消费", "开销", "支出", "购买", "买了", "订阅", "会员")
+    strong_words = ("续费", "充值", "扣费", "付款", "支付", "消费", "开销", "支出", "购买", "买了", "订阅", "会员", "健身", "游泳", "洗衣服", "洗衣")
     blocked_words = ("提醒", "待办", "任务", "天气", "下雨", "收入", "工资", "报销", "红包", "到账", "入账")
     if expense_amount_match(stripped) or is_question_like(stripped):
+        return None
+    if stripped.endswith(("了", "过")) and not any(word in stripped for word in ("续费", "充值", "扣费", "付款", "支付", "消费", "开销", "支出", "购买", "买了")):
+        return None
+    if any(word in stripped for word in ("去健身", "去游泳", "在健身", "正在健身")):
         return None
     if not any(word in stripped for word in strong_words) or any(word in stripped for word in blocked_words):
         return None
@@ -5057,6 +5169,8 @@ def active_pending_confirmation_kind(state: dict, chat_id: int | None) -> str | 
             return kind
         if kind == "expense_amount" and pending_expense_store(state).get(key):
             return kind
+        if kind == "expense_or_time" and pending_expense_or_time_store(state).get(key):
+            return kind
     if note_pending_store(state).get(key):
         return "note"
     if pending_task_store(state).get(key):
@@ -5067,6 +5181,8 @@ def active_pending_confirmation_kind(state: dict, chat_id: int | None) -> str | 
         return "record_action"
     if pending_expense_store(state).get(key):
         return "expense_amount"
+    if pending_expense_or_time_store(state).get(key):
+        return "expense_or_time"
     return None
 
 
@@ -5109,6 +5225,8 @@ def handle_pending_confirmation_center(config: dict, text: str, chat_id: int | N
         return handle_pending_record_action(text, chat_id, intent)
     if kind == "expense_amount":
         return handle_pending_expense_amount(text, chat_id)
+    if kind == "expense_or_time":
+        return handle_pending_expense_or_time(text, chat_id)
     return None
 
 def handle_text(config: dict, text: str, reply_context: str = "", chat_id: int | None = None) -> str | dict:
@@ -5240,6 +5358,9 @@ def handle_text(config: dict, text: str, reply_context: str = "", chat_id: int |
     if local_result:
         return local_result
     if not has_multi_intent_hint(text):
+        ambiguous_expense = ambiguous_expense_or_time_candidate(text)
+        if ambiguous_expense:
+            return queue_pending_expense_or_time(ambiguous_expense, chat_id)
         local_record = local_simple_income_parse(text) or local_simple_expense_parse(text)
         if local_record:
             return save_parsed(local_record)

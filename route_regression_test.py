@@ -1171,6 +1171,66 @@ def assert_incomplete_expense_confirmation_cases(failures: list[str]) -> None:
         finally:
             bot.call_deepseek = original_call_deepseek
 
+
+def assert_expense_time_ambiguity_cases(failures: list[str]) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        retarget_data_paths(Path(tmp))
+        bot.ensure_files()
+        original_call_deepseek = bot.call_deepseek
+
+        def fail_call_deepseek(*_args, **_kwargs):
+            raise AssertionError("expense/time ambiguity case unexpectedly called DeepSeek")
+
+        bot.call_deepseek = fail_call_deepseek
+        try:
+            config = {"deepseek_api_key": "", "deepseek_model": "", "default_city": "深圳"}
+            reply = bot.handle_text(config, "九月四号10健身", chat_id=995)
+            if not isinstance(reply, str) or "两种可能" not in reply or "记账" not in reply or "提醒" not in reply:
+                failures.append(f"expense/time ambiguity prompt: unexpected reply {reply!r}")
+            if bot.read_csv_rows(bot.EXPENSES_CSV) or bot.read_csv_rows(bot.REMINDERS_CSV):
+                failures.append("expense/time ambiguity prompt: saved a record before confirmation")
+
+            reply = bot.handle_text(config, "记账", chat_id=995)
+            rows = bot.read_csv_rows(bot.EXPENSES_CSV)
+            saved = rows[-1] if rows else {}
+            if "已记录消费" not in str(reply) or saved.get("date") != "2026-09-04" or saved.get("item") != "健身" or saved.get("amount") != "10.0" or saved.get("category") != "娱乐":
+                failures.append(f"expense/time ambiguity expense choice: reply={reply!r}, row={saved!r}")
+            if bot.read_csv_rows(bot.REMINDERS_CSV):
+                failures.append("expense/time ambiguity expense choice: created an unwanted reminder")
+
+            reply = bot.handle_text(config, "九月四号洗衣服", chat_id=996)
+            if not isinstance(reply, str) or "缺金额" not in reply or "洗衣服" not in reply:
+                failures.append(f"laundry missing amount: unexpected reply {reply!r}")
+            reply = bot.handle_text(config, "3块", chat_id=996)
+            rows = bot.read_csv_rows(bot.EXPENSES_CSV)
+            saved = rows[-1] if rows else {}
+            if "已记录消费" not in str(reply) or saved.get("date") != "2026-09-04" or saved.get("item") != "洗衣服" or saved.get("amount") != "3.0" or saved.get("category") != "购物":
+                failures.append(f"laundry amount follow-up: reply={reply!r}, row={saved!r}")
+
+            reply = bot.handle_text(config, "九月四号健身10块", chat_id=997)
+            rows = bot.read_csv_rows(bot.EXPENSES_CSV)
+            saved = rows[-1] if rows else {}
+            if "已记录消费" not in str(reply) or saved.get("item") != "健身" or saved.get("amount") != "10.0" or saved.get("category") != "娱乐":
+                failures.append(f"explicit fitness expense: reply={reply!r}, row={saved!r}")
+
+            if bot.ambiguous_expense_or_time_candidate("九月四号10点健身") is not None:
+                failures.append("expense/time guard: explicit clock should not ask expense/time confirmation")
+            if bot.expense_amount_match("今天健身10次") is not None:
+                failures.append("expense/time guard: repetitions should not be treated as money")
+            if bot.incomplete_expense_candidate("今天去健身了") is not None:
+                failures.append("expense/time guard: completed activity should not request an amount")
+
+            bot.queue_pending_expense_or_time({
+                "date": "2099-09-04", "name": "健身", "amount": 10.0,
+                "category": "娱乐", "remind_at": "2099-09-04 10:00:00",
+            }, 998)
+            reply = bot.handle_text(config, "提醒", chat_id=998)
+            reminders = bot.read_csv_rows(bot.REMINDERS_CSV)
+            saved_reminder = reminders[-1] if reminders else {}
+            if "提醒已设好" not in str(reply) or saved_reminder.get("text") != "健身" or saved_reminder.get("remind_at") != "2099-09-04 10:00:00":
+                failures.append(f"expense/time ambiguity reminder choice: reply={reply!r}, row={saved_reminder!r}")
+        finally:
+            bot.call_deepseek = original_call_deepseek
 def main() -> None:
     failures: list[str] = []
     assert_route_cases(failures)
@@ -1181,6 +1241,7 @@ def main() -> None:
     assert_quote_delete_recent_cases(failures)
     assert_undo_and_error_fallback_cases(failures)
     assert_incomplete_expense_confirmation_cases(failures)
+    assert_expense_time_ambiguity_cases(failures)
     assert_note_confirmation_cases(failures)
     assert_note_guard_cases(failures)
     assert_goal_tone_history_cases(failures)
