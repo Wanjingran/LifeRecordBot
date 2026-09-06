@@ -1834,6 +1834,8 @@ TONE_ALIASES = {
     "brief": "简洁工具人",
     "strict": "严格督促",
     "senior": "学长式督促",
+    "playful": "\u8f7b\u677e\u5e7d\u9ed8",
+    "calm": "\u5b89\u9759\u503e\u542c",
 }
 
 
@@ -1855,6 +1857,10 @@ def tone_mode_from_text(text: str) -> str | None:
         return "strict"
     if any(word in text for word in ("学长", "学姐", "前辈")):
         return "senior"
+    if any(word in text for word in ("\u8f7b\u677e", "\u5e7d\u9ed8", "\u6d3b\u6cfc", "\u6709\u8da3")):
+        return "playful"
+    if any(word in text for word in ("\u5b89\u9759", "\u503e\u542c", "\u5c11\u5efa\u8bae", "\u53ea\u542c\u6211\u8bf4")):
+        return "calm"
     if any(word in text for word in ("温柔", "陪伴", "正常", "默认")):
         return "warm"
     return None
@@ -1867,7 +1873,7 @@ def set_tone_mode_reply(text: str) -> str | None:
     state = read_state()
     state["tone_mode"] = mode
     write_state(state)
-    return f"语气已切换：{TONE_ALIASES[mode]}。你可以随时说：切换简洁模式 / 切换严格模式 / 切换温柔模式。"
+    return f"语气已切换：{TONE_ALIASES[mode]}。你可以随时说：切换简洁 / 严格 / 温柔 / 轻松 / 安静倾听模式。"
 
 
 def style_reply(text: str, kind: str = "chat") -> str:
@@ -3603,29 +3609,169 @@ def has_chat_hint(text: str) -> bool:
     return False
 
 
-def local_chat_reply(text: str) -> str:
-    if any(word in text for word in ("你好", "在吗", "早安")):
-        reply = random.choice(["我在。今天想先处理哪一件小事？", "在的，慢慢说，我跟着你一起理。", "来了。今天我们从最容易推进的一步开始。"])
-    elif "晚安" in text:
-        reply = random.choice(["晚安。今天就先到这里，能收住也是一种完成。", "晚安，明天再继续。今天剩下的交给睡眠。"])
-    elif any(word in text for word in ("鼓励", "夸夸", "给我打气")):
-        reply = random.choice(["你已经在把生活一点点接回自己手里了，这件事不小。", "能想到让自己被支持一下，说明你没有放弃往前走。", "今天先别要求满分，能动一小步就很硬气。"])
-    elif any(word in text for word in ("无聊", "没事干", "不知道干嘛")):
-        reply = random.choice(["那就挑一个低门槛动作：洗把脸、收拾桌面一角，或者走五分钟。别急着找意义，先让身体动一下。", "无聊的时候别硬逼自己燃起来，先做一件小到不会抗拒的事。", "可以把接下来 20 分钟当成试运行：做一点点，够了就停。"])
-    elif any(word in text for word in ("怎么办", "建议")):
-        reply = "先把问题缩小到下一步：现在最影响你的那一件事是什么？说出来我帮你拆。"
-    else:
-        reply = random.choice(["收到。我在这儿，你可以继续说。", "嗯，我听到了。这个状态先不用急着定义。", "可以，先把这句话放下来，我们再慢慢处理后面的。"])
+CHAT_HISTORY_LIMIT = 12
+
+
+def chat_history_store(state: dict) -> dict:
+    return state.setdefault("chat_history", {})
+
+
+def recent_chat_messages(chat_id: int | None, limit: int = 8) -> list[dict]:
+    if chat_id is None:
+        return []
+    try:
+        rows = chat_history_store(read_state()).get(str(chat_id), [])
+    except Exception:
+        return []
+    messages = []
+    for row in rows[-max(1, limit):]:
+        role = str(row.get("role") or "")
+        content = str(row.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            messages.append({"role": role, "content": content[:500]})
+    return messages
+
+
+def remember_chat_exchange(chat_id: int | None, user_text: str, assistant_text: str) -> None:
+    if chat_id is None or not user_text.strip() or not assistant_text.strip():
+        return
+    state = read_state()
+    store = chat_history_store(state)
+    key = str(chat_id)
+    rows = list(store.get(key) or [])
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows.extend([
+        {"role": "user", "content": user_text.strip()[:500], "created_at": timestamp},
+        {"role": "assistant", "content": assistant_text.strip()[:500], "created_at": timestamp},
+    ])
+    store[key] = rows[-CHAT_HISTORY_LIMIT:]
+    write_state(state)
+
+
+def chat_scene(text: str) -> str:
+    rules = (
+        ("thanks", ("\u8c22\u8c22", "\u8c22\u5566", "\u611f\u8c22")),
+        ("goodnight", ("\u665a\u5b89", "\u7761\u4e86", "\u8981\u7761")),
+        ("greeting", ("\u4f60\u597d", "\u5728\u5417", "\u65e9\u5b89", "hello", "hi")),
+        ("celebrate", ("\u6210\u529f", "\u505a\u5230\u4e86", "\u5b8c\u6210\u4e86", "\u592a\u597d\u4e86", "\u987a\u5229", "\u5f00\u5fc3")),
+        ("encourage", ("\u9f13\u52b1", "\u5938\u5938", "\u6253\u6c14", "\u652f\u6301\u6211")),
+        ("anxious", ("\u7126\u8651", "\u7d27\u5f20", "\u62c5\u5fc3", "\u5bb3\u6015", "\u5fc3\u614c", "\u538b\u529b")),
+        ("tired", ("\u7d2f", "\u75b2\u60eb", "\u56f0", "\u6ca1\u7cbe\u795e")),
+        ("lonely", ("\u5b64\u72ec", "\u6ca1\u4eba\u966a", "\u60f3\u627e\u4eba\u804a")),
+        ("bored", ("\u65e0\u804a", "\u6ca1\u4e8b\u5e72", "\u4e0d\u77e5\u9053\u5e72\u561b")),
+        ("indecision", ("\u7ea0\u7ed3", "\u9009\u54ea\u4e2a", "\u62ff\u4e0d\u5b9a", "\u8981\u4e0d\u8981")),
+        ("vent", ("\u70e6", "\u96be\u53d7", "\u59d4\u5c48", "\u751f\u6c14", "\u5410\u69fd", "\u5d29\u6e83")),
+        ("advice", ("\u600e\u4e48\u529e", "\u5efa\u8bae", "\u600e\u4e48\u505a", "\u4f60\u89c9\u5f97")),
+    )
+    lowered = text.lower()
+    for scene, words in rules:
+        if any(word in lowered or word in text for word in words):
+            return scene
+    return "casual"
+
+
+def varied_local_reply(options: list[str], chat_id: int | None) -> str:
+    recent = {row["content"] for row in recent_chat_messages(chat_id, CHAT_HISTORY_LIMIT) if row["role"] == "assistant"}
+    choices = [item for item in options if item not in recent] or options
+    return random.choice(choices)
+
+
+def is_general_chat_candidate(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped or len(stripped) > 500 or stripped.startswith("/"):
+        return False
+    if has_multi_intent_hint(stripped) or is_delete_request(stripped) or has_non_note_intent(stripped):
+        return False
+    if is_question_like(stripped):
+        return True
+    conversational_markers = (
+        "\u6211\u89c9\u5f97", "\u6211\u60f3", "\u6211\u597d\u50cf", "\u8bf4\u5b9e\u8bdd", "\u5176\u5b9e", "\u7a81\u7136", "\u521a\u521a",
+        "\u804a\u804a", "\u542c\u6211\u8bf4", "\u4f60\u8bf4", "\u4f60\u89c9\u5f97", "\u771f\u7684\u5417", "\u662f\u5417",
+    )
+    return any(word in stripped for word in conversational_markers)
+
+def local_chat_reply(text: str, chat_id: int | None = None) -> str:
+    banks = {
+        "greeting": [
+            "\u6211\u5728\u3002\u4eca\u5929\u60f3\u804a\u70b9\u4ec0\u4e48\uff1f",
+            "\u6765\u4e86\u3002\u4f60\u8bf4\uff0c\u6211\u8ddf\u7740\u3002",
+            "\u5728\u7684\uff0c\u4eca\u5929\u662f\u60f3\u89e3\u51b3\u4e8b\u60c5\uff0c\u8fd8\u662f\u968f\u4fbf\u804a\u804a\uff1f",
+        ],
+        "goodnight": [
+            "\u665a\u5b89\u3002\u4eca\u5929\u5230\u8fd9\u91cc\u5c31\u591f\u4e86\u3002",
+            "\u53bb\u7761\u5427\uff0c\u5269\u4e0b\u7684\u4e8b\u660e\u5929\u518d\u63a5\u3002",
+            "\u6536\u5de5\u3002\u795d\u4f60\u4eca\u665a\u7761\u5f97\u5b89\u7a33\u4e00\u70b9\u3002",
+        ],
+        "thanks": [
+            "\u4e0d\u5ba2\u6c14\uff0c\u8fd9\u4ef6\u4e8b\u6211\u4eec\u7b97\u662f\u4e00\u8d77\u63a8\u8fdb\u4e86\u3002",
+            "\u6536\u5230\u8fd9\u53e5\u8c22\u8c22\u4e86\u3002\u6211\u7ee7\u7eed\u5728\u8fd9\u513f\u3002",
+            "\u5ba2\u6c14\u4ec0\u4e48\uff0c\u597d\u7528\u5c31\u884c\u3002",
+        ],
+        "celebrate": [
+            "\u597d\uff0c\u8fd9\u4e0b\u771f\u7684\u503c\u5f97\u9ad8\u5174\u4e00\u4e0b\u3002",
+            "\u5e72\u5f97\u6f02\u4eae\u3002\u5148\u522b\u6025\u7740\u5954\u4e0b\u4e00\u5173\uff0c\u4eab\u53d7\u4e00\u4e0b\u8fd9\u4e2a\u7ed3\u679c\u3002",
+            "\u8fd9\u4e2a\u53ef\u4ee5\u6709\u3002\u4f60\u521a\u521a\u786e\u5b9e\u628a\u4e8b\u60c5\u505a\u6210\u4e86\u3002",
+        ],
+        "encourage": [
+            "\u4f60\u4e0d\u9700\u8981\u4e00\u53e3\u6c14\u8bc1\u660e\u81ea\u5df1\uff0c\u80af\u7ee7\u7eed\u5c31\u5df2\u7ecf\u5f88\u6709\u5206\u91cf\u3002",
+            "\u6211\u7ed9\u4f60\u6491\u4e00\u4e0b\uff1a\u5148\u505a\u4e94\u5206\u949f\uff0c\u4e94\u5206\u949f\u4e4b\u540e\u518d\u51b3\u5b9a\u8981\u4e0d\u8981\u7ee7\u7eed\u3002",
+            "\u522b\u5c0f\u770b\u4f60\u5df2\u7ecf\u8d70\u7684\u90a3\u4e00\u6bb5\uff0c\u73b0\u5728\u53ea\u9700\u8981\u518d\u5f80\u524d\u632a\u4e00\u70b9\u3002",
+        ],
+        "anxious": [
+            "\u542c\u8d77\u6765\u8111\u5b50\u91cc\u540c\u65f6\u5f00\u4e86\u5f88\u591a\u7a97\u53e3\u3002\u6211\u4eec\u5148\u5173\u6389\u6700\u4e0d\u6025\u7684\u4e00\u4e2a\u3002",
+            "\u4f60\u73b0\u5728\u4e0d\u7528\u89e3\u51b3\u5168\u90e8\uff0c\u5148\u786e\u5b9a\u63a5\u4e0b\u6765\u5341\u5206\u949f\u505a\u4ec0\u4e48\u3002",
+            "\u8fd9\u4efd\u7d27\u5f20\u6709\u6765\u7531\u3002\u4f60\u53ef\u4ee5\u5148\u628a\u6700\u62c5\u5fc3\u7684\u90a3\u4e00\u70b9\u8bf4\u7ed9\u6211\u3002",
+        ],
+        "tired": [
+            "\u542c\u8d77\u6765\u4f60\u73b0\u5728\u9700\u8981\u7684\u4e0d\u662f\u52a0\u7801\uff0c\u662f\u56de\u4e00\u70b9\u7535\u3002",
+            "\u7d2f\u5c31\u5148\u627f\u8ba4\u7d2f\uff0c\u522b\u8fde\u4f11\u606f\u90fd\u505a\u6210\u4e00\u9879\u8003\u6838\u3002",
+            "\u4eca\u5929\u53ef\u4ee5\u8c03\u4f4e\u529f\u7387\u3002\u559d\u70b9\u6c34\uff0c\u5750\u4e00\u4f1a\u513f\uff0c\u518d\u770b\u8981\u4e0d\u8981\u7ee7\u7eed\u3002",
+        ],
+        "lonely": [
+            "\u6211\u5728\u542c\u3002\u8fd9\u4e00\u523b\u4f60\u4e0d\u7528\u628a\u8bdd\u8bf4\u5f97\u5f88\u5b8c\u6574\u3002",
+            "\u5b64\u72ec\u7684\u65f6\u5019\uff0c\u6709\u4e2a\u5730\u65b9\u80fd\u628a\u8bdd\u653e\u4e0b\u5c31\u597d\u3002\u4f60\u7ee7\u7eed\u8bf4\u5427\u3002",
+            "\u6211\u4e0d\u6025\u7740\u7ed9\u5efa\u8bae\u3002\u4f60\u73b0\u5728\u6700\u60f3\u88ab\u4eba\u7406\u89e3\u7684\u662f\u54ea\u4e00\u90e8\u5206\uff1f",
+        ],
+        "bored": [
+            "\u65e0\u804a\u4e5f\u4e0d\u662f\u9519\u8bef\u63d0\u793a\u3002\u8981\u4e0d\u968f\u4fbf\u9009\u4e2a\u5c0f\u4e8b\u8bd5\u8fd0\u884c\u5341\u5206\u949f\uff1f",
+            "\u6211\u4eec\u53ef\u4ee5\u4e0d\u627e\u610f\u4e49\uff0c\u53ea\u627e\u70b9\u65b0\u9c9c\u611f\u3002",
+            "\u90a3\u5c31\u5f00\u4e2a\u76f2\u76d2\uff1a\u6563\u6b65\u3001\u6536\u62fe\u4e00\u5c0f\u5757\u3001\u770b\u4e00\u4e2a\u77ed\u89c6\u9891\uff0c\u968f\u4fbf\u62bd\u4e00\u4e2a\u3002",
+        ],
+        "indecision": [
+            "\u5148\u4e0d\u95ee\u54ea\u4e2a\u5b8c\u7f8e\uff0c\u95ee\u54ea\u4e2a\u66f4\u5bb9\u6613\u53cd\u6094\u3002",
+            "\u628a\u4e24\u4e2a\u9009\u9879\u53d1\u7ed9\u6211\uff0c\u6211\u4eec\u6309\u6210\u672c\u3001\u6536\u76ca\u548c\u53ef\u9006\u6027\u5feb\u901f\u8fc7\u4e00\u904d\u3002",
+            "\u5982\u679c\u4e24\u4e2a\u90fd\u53ef\u4ee5\uff0c\u5c31\u9009\u90a3\u4e2a\u66f4\u5bb9\u6613\u5f00\u59cb\u7684\u3002",
+        ],
+        "vent": [
+            "\u8fd9\u786e\u5b9e\u5f88\u70e6\u3002\u5148\u4e0d\u6025\u7740\u628a\u81ea\u5df1\u8c03\u6210\u79ef\u6781\u6a21\u5f0f\u3002",
+            "\u4f60\u53ef\u4ee5\u5728\u8fd9\u91cc\u628a\u8fd9\u4ef6\u4e8b\u5410\u69fd\u5b8c\uff0c\u6211\u5148\u4e0d\u62a2\u7740\u6559\u4f60\u600e\u4e48\u505a\u3002",
+            "\u6536\u5230\uff0c\u8fd9\u4e00\u6bb5\u771f\u7684\u4e0d\u987a\u3002\u4f60\u60f3\u5148\u51fa\u51fa\u6c14\uff0c\u8fd8\u662f\u4e00\u8d77\u7406\u89e3\u51b3\u65b9\u6cd5\uff1f",
+        ],
+        "advice": [
+            "\u5148\u628a\u95ee\u9898\u7f29\u5c0f\u5230\u4e0b\u4e00\u6b65\uff1a\u73b0\u5728\u6700\u5361\u4f60\u7684\u662f\u54ea\u4e00\u70b9\uff1f",
+            "\u53ef\u4ee5\u3002\u4f60\u628a\u76ee\u6807\u3001\u9650\u5236\u548c\u6700\u62c5\u5fc3\u7684\u7ed3\u679c\u5404\u8bf4\u4e00\u53e5\uff0c\u6211\u5e2e\u4f60\u5feb\u901f\u62c6\u3002",
+            "\u6211\u4eec\u5148\u627e\u4e00\u4e2a\u80fd\u64a4\u56de\u7684\u5c0f\u5c1d\u8bd5\uff0c\u4e0d\u7528\u4e00\u4e0a\u6765\u5c31\u505a\u6700\u7ec8\u51b3\u5b9a\u3002",
+        ],
+        "casual": [
+            "\u6211\u542c\u5230\u4e86\u3002\u4f60\u60f3\u7ee7\u7eed\u8bf4\u8fd9\u4e2a\uff0c\u6211\u5c31\u8ddf\u7740\u3002",
+            "\u8fd9\u53e5\u8bdd\u91cc\u597d\u50cf\u8fd8\u6709\u4e00\u70b9\u540e\u7eed\u3002",
+            "\u55ef\uff0c\u6211\u5728\u3002\u8fd9\u4ef6\u4e8b\u5bf9\u4f60\u6765\u8bf4\u6700\u660e\u663e\u7684\u611f\u53d7\u662f\u4ec0\u4e48\uff1f",
+        ],
+    }
+    reply = varied_local_reply(banks[chat_scene(text)], chat_id)
     return style_reply(reply, "chat")
 
 
-def safe_companion_reply(config: dict, text: str) -> str:
+def safe_companion_reply(config: dict, text: str, chat_id: int | None = None) -> str:
     try:
         if config.get("deepseek_api_key"):
-            return companion_answer(config, text)
+            reply = companion_answer(config, text, chat_id)
+        else:
+            reply = local_chat_reply(text, chat_id)
     except Exception:
-        pass
-    return local_chat_reply(text)
+        reply = local_chat_reply(text, chat_id)
+    remember_chat_exchange(chat_id, text, reply)
+    return reply
 
 
 def mood_support_reply(items: list[dict]) -> str:
@@ -4029,16 +4175,63 @@ def weather_code_text(code) -> str:
 
 
 
-def companion_answer(config: dict, text: str) -> str:
+def next_chat_form(chat_id: int | None, scene: str) -> str:
+    form_map = {
+        "celebrate": ["celebrate", "playful", "reflect"],
+        "thanks": ["brief", "playful", "warm"],
+        "anxious": ["warm", "practical", "quiet"],
+        "tired": ["quiet", "warm", "practical"],
+        "vent": ["quiet", "reflect", "warm"],
+        "lonely": ["quiet", "warm", "curious"],
+        "indecision": ["practical", "curious", "reflect"],
+        "advice": ["practical", "curious", "brief"],
+        "bored": ["playful", "curious", "practical"],
+    }
+    choices = form_map.get(scene, ["warm", "curious", "reflect", "playful", "brief"])
+    if chat_id is None:
+        return random.choice(choices)
+    state = read_state()
+    history = state.setdefault("chat_form_history", {}).setdefault(str(chat_id), [])
+    available = [item for item in choices if item not in history[-2:]] or choices
+    selected = random.choice(available)
+    history.append(selected)
+    state["chat_form_history"][str(chat_id)] = history[-6:]
+    write_state(state)
+    return selected
+
+
+def companion_answer(config: dict, text: str, chat_id: int | None = None) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    tone = TONE_ALIASES.get(current_tone_mode(), "温柔陪伴")
+    mode = current_tone_mode()
+    tone = TONE_ALIASES.get(mode, "\u6e29\u67d4\u966a\u4f34")
+    response_form = next_chat_form(chat_id, chat_scene(text))
+    form_rules = {
+        "warm": "\u5148\u7ed9\u4e00\u53e5\u5177\u4f53\u56de\u5e94\uff0c\u518d\u81ea\u7136\u63a5\u4e0b\u53bb\u3002",
+        "quiet": "\u4ee5\u503e\u542c\u548c\u56de\u5e94\u4e3a\u4e3b\uff0c\u4e0d\u6025\u7740\u7ed9\u5efa\u8bae\u3002",
+        "practical": "\u7ed9\u4e00\u4e2a\u975e\u5e38\u5c0f\u3001\u53ef\u4ee5\u7acb\u523b\u6267\u884c\u7684\u5efa\u8bae\u3002",
+        "curious": "\u7528\u4e00\u4e2a\u771f\u6b63\u4e0e\u7528\u6237\u5185\u5bb9\u6709\u5173\u7684\u95ee\u9898\u5f80\u4e0b\u804a\u3002",
+        "reflect": "\u70b9\u51fa\u7528\u6237\u8fd9\u53e5\u8bdd\u91cc\u6700\u503c\u5f97\u88ab\u770b\u89c1\u7684\u7ec6\u8282\u3002",
+        "playful": "\u53ef\u4ee5\u8f7b\u677e\u4e00\u70b9\u3001\u5e26\u4e00\u70b9\u5e7d\u9ed8\uff0c\u4f46\u4e0d\u8981\u8f7b\u6162\u771f\u5b9e\u75db\u82e6\u3002",
+        "celebrate": "\u7b80\u77ed\u5e86\u795d\uff0c\u7a81\u51fa\u7528\u6237\u505a\u5230\u7684\u5177\u4f53\u4e8b\u60c5\u3002",
+        "brief": "\u53ea\u56de\u4e00\u5230\u4e24\u53e5\uff0c\u7b80\u6d01\u4f46\u4e0d\u6577\u884d\u3002",
+    }
+    tone_rules = {
+        "warm": "\u81ea\u7136\u6e29\u548c\uff0c\u50cf\u719f\u6089\u7684\u4eba\u5728\u8ba4\u771f\u56de\u8bdd\u3002",
+        "brief": "\u5c3d\u91cf\u53ea\u7528\u4e00\u5230\u4e24\u53e5\uff0c\u76f4\u63a5\u4e14\u6709\u7528\u3002",
+        "strict": "\u53ef\u4ee5\u76f4\u63a5\u7763\u4fc3\uff0c\u4f46\u4e0d\u8d2c\u4f4e\u3001\u4e0d\u7f9e\u8fb1\u7528\u6237\u3002",
+        "senior": "\u50cf\u53ef\u9760\u7684\u5b66\u957f\u6216\u524d\u8f88\uff0c\u7a33\u5f53\u3001\u5177\u4f53\uff0c\u4e0d\u7aef\u7740\u3002",
+        "playful": "\u8f7b\u677e\u6709\u8da3\uff0c\u4f46\u4e0d\u62ff\u7528\u6237\u7684\u75db\u82e6\u5f00\u73a9\u7b11\u3002",
+        "calm": "\u5c11\u7ed9\u5efa\u8bae\uff0c\u5148\u503e\u542c\u548c\u56de\u5e94\u7528\u6237\u771f\u6b63\u8868\u8fbe\u7684\u611f\u53d7\u3002",
+    }
     system = f"""
-你是一个日常生活助手。当前时间：{now}。当前语气模式：{tone}。
-用中文回答，语气温和、具体、简洁；若当前语气是严格督促，可以更直接但不要羞辱用户。
-目标是帮用户处理日常生活、学习、情绪、计划、选择和小问题。
-如果用户只是情绪倾诉，先接住情绪，再给一个很小、可以马上做的动作。
-不要长篇说教，不要空泛鸡汤，不要冒充专业医生/律师/理财顾问。
-遇到危险、自伤、严重疾病等高风险内容，建议立即联系现实中的可信任的人或专业机构。
+\u4f60\u662f\u4e00\u4e2a\u65e5\u5e38\u751f\u6d3b\u52a9\u624b\u3002\u5f53\u524d\u65f6\u95f4\uff1a{now}\u3002\u5f53\u524d\u8bed\u6c14\u6a21\u5f0f\uff1a{tone}\u3002
+\u8bed\u6c14\u8981\u6c42\uff1a{tone_rules.get(mode, tone_rules["warm"])}
+\u672c\u6b21\u56de\u5e94\u5f62\u5f0f\uff1a{form_rules[response_form]}
+\u7528\u4e2d\u6587\u81ea\u7136\u56de\u7b54\uff0c\u9ed8\u8ba4 1-4 \u53e5\uff0c\u957f\u5ea6\u8ddf\u968f\u7528\u6237\u3002
+\u5148\u5224\u65ad\u7528\u6237\u662f\u5728\u5206\u4eab\u3001\u503e\u8bc9\u3001\u5e86\u795d\u3001\u5410\u69fd\u3001\u6c42\u5efa\u8bae\u8fd8\u662f\u968f\u4fbf\u804a\uff0c\u518d\u56de\u5e94\u3002
+\u4e0d\u8981\u6bcf\u6b21\u90fd\u4ee5\u201c\u6536\u5230\u201d\u201c\u542c\u8d77\u6765\u201d\u5f00\u5934\uff0c\u4e0d\u8981\u6bcf\u6b21\u90fd\u7ed9\u884c\u52a8\u5efa\u8bae\u6216\u4ee5\u95ee\u53e5\u7ed3\u5c3e\u3002
+\u4e0d\u957f\u7bc7\u8bf4\u6559\uff0c\u4e0d\u7a7a\u6cdb\u9e21\u6c64\uff0c\u4e0d\u5192\u5145\u4e13\u4e1a\u533b\u751f\u3001\u5f8b\u5e08\u6216\u7406\u8d22\u987e\u95ee\u3002
+\u9047\u5230\u5371\u9669\u3001\u81ea\u4f24\u6216\u4e25\u91cd\u75be\u75c5\u7b49\u9ad8\u98ce\u9669\u5185\u5bb9\uff0c\u5efa\u8bae\u7acb\u5373\u8054\u7cfb\u73b0\u5b9e\u4e2d\u53ef\u4fe1\u4efb\u7684\u4eba\u6216\u4e13\u4e1a\u673a\u6784\u3002
 """.strip()
     payload = {
         "model": config["deepseek_model"],
@@ -4046,7 +4239,8 @@ def companion_answer(config: dict, text: str) -> str:
             {"role": "system", "content": system},
             {"role": "user", "content": text},
         ],
-        "temperature": 0.7,
+        "temperature": 0.85,
+        "top_p": 0.9,
         "stream": False,
     }
     result = http_json(
@@ -4055,7 +4249,8 @@ def companion_answer(config: dict, text: str) -> str:
         headers={"Authorization": f"Bearer {config['deepseek_api_key']}"},
         timeout=90,
     )
-    return result["choices"][0]["message"]["content"].strip()
+    reply = str(result["choices"][0]["message"]["content"] or "").strip()
+    return style_reply(reply, "chat")
 
 
 def json_from_model_content(content: str) -> dict:
@@ -5448,7 +5643,7 @@ def handle_text(config: dict, text: str, reply_context: str = "", chat_id: int |
         if not content:
             return "你可以这样发：\n/mood 今天有点烦，事情很多但不想动"
         saved = save_parsed(local_mood_parse(content))
-        return saved + "\n\n" + companion_answer(config, content)
+        return saved + "\n\n" + safe_companion_reply(config, content, chat_id)
 
     if is_weather_question(text) and not has_multi_intent_hint(text):
         return with_support_layer(weather_answer(config, text), text, {"weather"})
@@ -5456,12 +5651,14 @@ def handle_text(config: dict, text: str, reply_context: str = "", chat_id: int |
         parsed = {"actions": [{"type": "weather", "text": text}, local_mood_parse(text)]}
         return execute_parsed_result(parsed, chat_id, config, text)
     if has_chat_hint(text) and not has_multi_intent_hint(text):
-        return safe_companion_reply(config, text)
+        return safe_companion_reply(config, text, chat_id)
     if should_confirm_life_note(text, chat_id) and not has_multi_intent_hint(text):
         return chat_then_queue_pending_note_confirmation(text, chat_id)
 
     if is_mood_statement(text) and not has_multi_intent_hint(text):
         return save_parsed(local_mood_parse(text))
+    if is_general_chat_candidate(text):
+        return safe_companion_reply(config, text, chat_id)
 
     prompt_text = text
     if reply_context:

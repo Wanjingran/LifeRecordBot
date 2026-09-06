@@ -129,3 +129,56 @@ def test_duration_and_quantity_are_never_money(value: int) -> None:
 @given(st.integers(min_value=1, max_value=28))
 def test_calendar_date_is_never_money(day: int) -> None:
     assert bot.expense_amount_match(f"2026-09-{day:02d}\u5065\u8eab") is None
+
+def test_chat_history_is_local_bounded_and_isolated(tmp_path: Path) -> None:
+    retarget(tmp_path)
+    bot.ensure_files()
+    config = {"deepseek_api_key": "", "deepseek_model": "", "default_city": ""}
+    replies = [
+        bot.safe_companion_reply(config, "\u4f60\u597d", chat_id=2001)
+        for _ in range(3)
+    ]
+    assert len(set(replies)) == 3
+    assert len(bot.recent_chat_messages(2001, 20)) == 6
+    assert bot.recent_chat_messages(2002, 20) == []
+    for index in range(10):
+        bot.remember_chat_exchange(2001, f"user-{index}", f"assistant-{index}")
+    history = bot.recent_chat_messages(2001, 30)
+    assert len(history) == bot.CHAT_HISTORY_LIMIT
+    assert history[-1]["content"] == "assistant-9"
+
+
+def test_companion_sends_only_current_message(tmp_path: Path, monkeypatch) -> None:
+    retarget(tmp_path)
+    bot.ensure_files()
+    bot.remember_chat_exchange(2101, "private-old-user", "private-old-assistant")
+    captured = {}
+
+    def fake_http_json(url, payload=None, headers=None, timeout=60):
+        captured["payload"] = payload
+        return {"choices": [{"message": {"content": "current-reply"}}]}
+
+    monkeypatch.setattr(bot, "http_json", fake_http_json)
+    reply = bot.companion_answer(
+        {"deepseek_api_key": "test", "deepseek_model": "deepseek-chat"},
+        "current-message",
+        chat_id=2101,
+    )
+    assert reply == "current-reply"
+    messages = captured["payload"]["messages"]
+    assert len(messages) == 2
+    assert messages[-1] == {"role": "user", "content": "current-message"}
+    assert "private-old-user" not in str(messages)
+    assert "private-old-assistant" not in str(messages)
+
+
+def test_general_chat_does_not_steal_skills() -> None:
+    assert bot.is_general_chat_candidate("\u4f60\u89c9\u5f97\u6211\u8be5\u600e\u4e48\u9009\uff1f")
+    assert not bot.is_general_chat_candidate("\u65e9\u991012.5")
+    assert not bot.is_general_chat_candidate("\u6df1\u5733\u660e\u5929\u5929\u6c14\u600e\u4e48\u6837")
+    assert not bot.is_general_chat_candidate("\u4eca\u5929\u5fc3\u60c5\u4e0d\u9519")
+
+
+def test_new_tone_modes_are_recognized() -> None:
+    assert bot.tone_mode_from_text("\u5207\u6362\u8f7b\u677e\u6a21\u5f0f") == "playful"
+    assert bot.tone_mode_from_text("\u5207\u6362\u5b89\u9759\u503e\u542c\u6a21\u5f0f") == "calm"
