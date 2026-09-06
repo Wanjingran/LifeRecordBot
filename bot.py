@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import ctypes
 import json
@@ -8,12 +9,25 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib import error, request
 from urllib.parse import quote, urlencode
+
+from skill_runtime import (
+    analyze_semantics,
+    first_money_match,
+    rapid_ocr_text,
+    semantic_location,
+    semantic_sentences,
+    sync_all_snapshots,
+    sync_csv_snapshot,
+    validate_action_contract,
+    verify_snapshots,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -33,6 +47,7 @@ GOALS_CSV = DATA_DIR / "goals.csv"
 GOAL_LOGS_CSV = DATA_DIR / "goal_logs.csv"
 RAW_JSONL = DATA_DIR / "raw_messages.jsonl"
 STATE_PATH = ROOT / "state.json"
+DATA_LOCK = threading.RLock()
 DELETE_WORDS = (
     "删", "删除", "删掉", "删去", "移除", "去掉", "撤销", "撤回",
     "取消", "取消掉", "作废", "清除", "清掉", "抹掉", "关掉", "关闭",
@@ -106,6 +121,49 @@ def ensure_files() -> None:
     ensure_csv_columns(GOAL_LOGS_CSV, ["goal_id", "date", "amount", "unit", "note", "created_at"])
     if not STATE_PATH.exists():
         STATE_PATH.write_text(json.dumps({"offset": 0}, ensure_ascii=False, indent=2), encoding="utf-8")
+    sync_sqlite_records()
+
+
+def sqlite_database_path() -> Path:
+    return DATA_DIR / "life_record.db"
+
+
+def record_snapshot_sources() -> dict[str, Path]:
+    return {
+        "expenses": EXPENSES_CSV,
+        "income": INCOME_CSV,
+        "dates": DATES_CSV,
+        "notes": NOTES_CSV,
+        "moods": MOODS_CSV,
+        "reminders": REMINDERS_CSV,
+        "budgets": BUDGETS_CSV,
+        "todos": TODOS_CSV,
+        "goals": GOALS_CSV,
+        "goal_logs": GOAL_LOGS_CSV,
+    }
+
+
+def sync_sqlite_records() -> dict[str, int]:
+    try:
+        return sync_all_snapshots(sqlite_database_path(), record_snapshot_sources())
+    except Exception as exc:
+        print(f"SQLite mirror warning: {type(exc).__name__}: {exc}")
+        return {}
+
+
+def sync_sqlite_file(path: Path) -> None:
+    for kind, source in record_snapshot_sources().items():
+        if source == path:
+            try:
+                sync_csv_snapshot(sqlite_database_path(), kind, path)
+            except Exception as exc:
+                print(f"SQLite mirror warning for {kind}: {type(exc).__name__}: {exc}")
+            return
+
+
+def sqlite_snapshot_health() -> dict[str, tuple[int, int]]:
+    return verify_snapshots(sqlite_database_path(), record_snapshot_sources())
+
 
 def ensure_csv(path: Path, header: list[str]) -> None:
     if not path.exists():
@@ -169,8 +227,10 @@ def ensure_row_ids(path: Path, fallback_header: list[str]) -> None:
             writer.writerows(rows)
 
 def append_csv(path: Path, row: list) -> None:
-    with path.open("a", encoding="utf-8-sig", newline="") as f:
-        csv.writer(f).writerow(row)
+    with DATA_LOCK:
+        with path.open("a", encoding="utf-8-sig", newline="") as f:
+            csv.writer(f).writerow(row)
+        sync_sqlite_file(path)
 
 
 def http_json(url: str, payload: dict | None = None, headers: dict | None = None, timeout: int = 60) -> dict:
@@ -267,6 +327,9 @@ def tesseract_executable(config: dict) -> str:
 
 
 def ocr_image_text(config: dict, image_path: Path) -> str:
+    text = rapid_ocr_text(image_path)
+    if text:
+        return re.sub(r"\s+", " ", text).strip()
     exe = tesseract_executable(config)
     if not exe:
         return ""
@@ -433,6 +496,7 @@ VALID_ACTION_TYPES = {"expense", "income", "date", "note", "mood", "reminder", "
 
 
 def validate_action(action: dict) -> dict:
+    action = validate_action_contract(action, VALID_ACTION_TYPES)
     if not isinstance(action, dict):
         raise ValueError("DeepSeek returned an invalid action.")
     if action.get("type") not in VALID_ACTION_TYPES:
@@ -899,10 +963,7 @@ def dispatch_due_reminders(token: str) -> None:
                 row["sent_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
             changed = True
     if changed:
-        with REMINDERS_CSV.open("w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
+        write_csv_rows(REMINDERS_CSV, list(fieldnames), rows)
 
 
 def delete_linked_reminders_for_date(date_row: dict) -> int:
@@ -922,10 +983,7 @@ def delete_linked_reminders_for_date(date_row: dict) -> int:
             continue
         kept.append(row)
     if removed:
-        with REMINDERS_CSV.open("w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(kept)
+        write_csv_rows(REMINDERS_CSV, list(fieldnames), kept)
     return removed
 
 def delete_record(request_data: dict) -> str:
@@ -1755,10 +1813,20 @@ def read_csv_rows(path: Path) -> list[dict]:
 
 
 def write_csv_rows(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    with DATA_LOCK:
+        try:
+            with temp_path.open("w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+                f.flush()
+            temp_path.replace(path)
+            sync_sqlite_file(path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
 
 
 TONE_ALIASES = {
@@ -3457,7 +3525,7 @@ def expense_amount_match(text: str) -> re.Match | None:
     date_spans = [
         match.span()
         for match in re.finditer(
-            r"\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}(?:日|号)?|\d{1,2}\s*月\s*\d{1,2}\s*(?:日|号)?|\d{1,2}[-/.]\d{1,2}",
+            r"\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}(?:日|号)?|\d{1,2}\s*月\s*\d{1,2}\s*(?:日|号)?|\d{1,2}[-/]\d{1,2}",
             text,
         )
     ]
@@ -3468,7 +3536,7 @@ def expense_amount_match(text: str) -> re.Match | None:
         if re.match(r"\s*(?:年|月|日|号|点|时|分钟|分|小时|次|个|组|公里|km|kg|公斤)", tail, re.I):
             continue
         return match
-    return None
+    return first_money_match(text)
 
 
 def has_time_expression(text: str) -> bool:
@@ -3734,6 +3802,9 @@ def extract_city(config: dict, text: str) -> str:
         candidate = clean_city_name(match.group(1))
         if candidate:
             return candidate
+    location = semantic_location(text)
+    if location:
+        return clean_city_name(location) or location
     return config.get("default_city", "")
 
 
@@ -4160,14 +4231,16 @@ def local_simple_income_parse(text: str) -> dict | None:
     return {"type": "income", "items": [{"date": local_record_date(text), "source": source, "amount": amount, "category": category, "note": ""}]}
 
 def split_intent_segments(text: str) -> list[str]:
-    parts = re.split(r"[，,。；;\n]+|(?:然后|顺便|另外|还有|并且|同时)", text)
+    parts = []
+    for sentence in semantic_sentences(text):
+        parts.extend(re.split(r"[，,。；;\n]+|(?:然后|顺便|另外|还有|并且|同时)", sentence))
     return [part.strip() for part in parts if part and part.strip()]
 
 
 def local_expense_item_from_segment(segment: str) -> dict | None:
     if not has_expense_hint(segment):
         return None
-    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:元|块|rmb|RMB)?", segment)
+    match = expense_amount_match(segment)
     if not match:
         return None
     amount = safe_amount(match.group(1))
@@ -4175,16 +4248,16 @@ def local_expense_item_from_segment(segment: str) -> dict | None:
         return None
     before = segment[:match.start()]
     after = segment[match.end():]
-    name = strip_record_noise(before) or strip_record_noise(after) or "消费"
+    name = strip_record_noise(strip_expense_date_noise(before)) or strip_record_noise(strip_expense_date_noise(after)) or "消费"
     if len(name) > 30:
         name = name[-30:]
-    return {"date": local_record_date(segment), "name": name, "amount": amount, "category": normalize_expense_category(name, "其他"), "note": ""}
+    return {"date": expense_record_date(segment), "name": name, "amount": amount, "category": normalize_expense_category(name, "其他"), "note": ""}
 
 
 def local_income_item_from_segment(segment: str) -> dict | None:
     if not has_income_hint(segment):
         return None
-    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:元|块|rmb|RMB)?", segment)
+    match = expense_amount_match(segment)
     if not match:
         return None
     amount = safe_amount(match.group(1))
@@ -4192,21 +4265,24 @@ def local_income_item_from_segment(segment: str) -> dict | None:
         return None
     before = segment[:match.start()]
     after = segment[match.end():]
-    source = strip_income_noise(before) or strip_income_noise(after) or "收入"
+    source = strip_income_noise(strip_expense_date_noise(before)) or strip_income_noise(strip_expense_date_noise(after)) or "收入"
     if len(source) > 30:
         source = source[-30:]
-    return {"date": local_record_date(segment), "source": source, "amount": amount, "category": normalize_income_category(source, "其他"), "note": ""}
+    return {"date": expense_record_date(segment), "source": source, "amount": amount, "category": normalize_income_category(source, "其他"), "note": ""}
 
 
 def local_record_actions_from_text(text: str) -> list[dict]:
     expense_items = []
     income_items = []
+    shared_date = expense_record_date(text)
     for segment in split_intent_segments(text):
         income_item = local_income_item_from_segment(segment)
         if income_item:
+            income_item["date"] = shared_date
             income_items.append(income_item)
         expense_item = local_expense_item_from_segment(segment)
         if expense_item:
+            expense_item["date"] = shared_date
             expense_items.append(expense_item)
     actions = []
     if expense_items:
@@ -4214,6 +4290,15 @@ def local_record_actions_from_text(text: str) -> list[dict]:
     if income_items:
         actions.append({"type": "income", "items": income_items})
     return actions
+
+
+def complete_local_record_actions(text: str) -> list[dict]:
+    segments = split_intent_segments(text)
+    if len(segments) < 2:
+        return []
+    actions = local_record_actions_from_text(text)
+    parsed_count = sum(len(action.get("items") or []) for action in actions)
+    return actions if parsed_count == len(segments) else []
 
 
 def local_study_plan_action(text: str) -> dict:
@@ -4347,10 +4432,7 @@ def finance_plan_from_text(text: str) -> str | None:
             rows = list(csv.DictReader(f))
     rows = [row for row in rows if not (row.get("period") == "month" and row.get("category") == "总额")]
     rows.append({"period": "month", "category": "总额", "amount": f"{spend_limit:g}", "created_at": created_at, "id": uuid.uuid4().hex})
-    with BUDGETS_CSV.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["period", "category", "amount", "created_at", "id"])
-        writer.writeheader()
-        writer.writerows(rows)
+    write_csv_rows(BUDGETS_CSV, ["period", "category", "amount", "created_at", "id"], rows)
     return f"已做好本月财政规划：收入 {income:g} 元，计划省 {saving:g} 元，本月可支出预算 {spend_limit:g} 元。之后每笔消费都会按总预算提醒。"
 
 
@@ -4376,10 +4458,7 @@ def set_budget(text: str) -> str | None:
             rows = list(csv.DictReader(f))
     rows = [row for row in rows if not (row.get("period") == period and row.get("category") == category)]
     rows.append({"period": period, "category": category, "amount": f"{amount:g}", "created_at": created_at, "id": uuid.uuid4().hex})
-    with BUDGETS_CSV.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["period", "category", "amount", "created_at", "id"])
-        writer.writeheader()
-        writer.writerows(rows)
+    write_csv_rows(BUDGETS_CSV, ["period", "category", "amount", "created_at", "id"], rows)
     title = "本周" if period == "week" else "本月"
     return f"已设置{title}{category}预算：{amount:g} 元"
 
@@ -4491,10 +4570,7 @@ def complete_todo(text: str) -> str | None:
         return "没找到要完成的待办。你可以发：待办列表，然后说：完成待办1"
     target["status"] = "done"
     target["done_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with TODOS_CSV.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    write_csv_rows(TODOS_CSV, fieldnames, rows)
     return f"已完成：{target.get('text', '')}"
 
 
@@ -4668,10 +4744,7 @@ def save_budget_action(parsed: dict) -> str:
         rows.append({"period": period, "category": category, "amount": f"{amount:g}", "created_at": created_at, "id": uuid.uuid4().hex})
         title = "本周" if period == "week" else "本月"
         lines.append(f"- {title}{category}预算 {amount:g} 元")
-    with BUDGETS_CSV.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["period", "category", "amount", "created_at", "id"])
-        writer.writeheader()
-        writer.writerows(rows)
+    write_csv_rows(BUDGETS_CSV, ["period", "category", "amount", "created_at", "id"], rows)
     if not lines:
         return "没有识别到可保存的预算。"
     return "已设置预算：\n" + "\n".join(lines)
@@ -5357,6 +5430,9 @@ def handle_text(config: dict, text: str, reply_context: str = "", chat_id: int |
         local_result = set_budget(text) or add_todo(text) or complete_todo(text) or expense_query(text)
     if local_result:
         return local_result
+    local_record_batch = complete_local_record_actions(text)
+    if local_record_batch:
+        return execute_parsed_result({"actions": local_record_batch}, chat_id, config, text)
     if not has_multi_intent_hint(text):
         ambiguous_expense = ambiguous_expense_or_time_candidate(text)
         if ambiguous_expense:
@@ -5404,21 +5480,110 @@ def acquire_single_instance_lock():
         return None
     return mutex
 
-def main() -> None:
-    mutex = acquire_single_instance_lock()
-    if mutex is None:
-        print("LifeRecordBot is already running. This duplicate instance will exit.")
+def process_telegram_update(config: dict, token: str, update: dict) -> None:
+    message = update.get("message") or {}
+    chat = message.get("chat") or {}
+    user = message.get("from") or {}
+    chat_id = chat.get("id")
+    user_id = user.get("id")
+    text = message.get("text") or ""
+    reply_message = message.get("reply_to_message") or {}
+    quote_data = message.get("quote") or {}
+    reply_context = quote_data.get("text") or reply_message.get("text") or ""
+    if not chat_id:
         return
-    config = load_config()
-    ensure_files()
-    token = config["telegram_bot_token"]
-    allowed_user_ids = set(config["allowed_user_ids"])
-    print("LifeRecordBot started. Keep this window open. Press Ctrl+C to stop.")
+    allowed_user_ids = set(config.get("allowed_user_ids") or [])
+    if allowed_user_ids and user_id not in allowed_user_ids:
+        send_message(token, chat_id, "未授权用户。")
+        return
+    with DATA_LOCK:
+        append_raw(update)
+        try:
+            if text:
+                reply = handle_text(config, text, reply_context, chat_id)
+            elif image_file_id_from_message(message):
+                reply = handle_photo_message(config, token, message, chat_id)
+            else:
+                return
+            latest_state = read_state()
+            remember_chat(latest_state, chat_id)
+            reply = append_failure_protection_notice(latest_state, chat_id, reply)
+            if isinstance(reply, dict):
+                notice = append_first_daily_notice(latest_state, chat_id, "").strip()
+                if notice:
+                    send_message(token, chat_id, notice)
+            else:
+                reply = append_first_daily_notice(latest_state, chat_id, reply)
+            write_state(latest_state)
+            sync_sqlite_records()
+        except Exception as exc:
+            print(f"Message handling error: {type(exc).__name__}: {exc}")
+            reply = BUG_FALLBACK_MESSAGE
+    try:
+        send_reply(token, chat_id, reply)
+    except Exception as exc:
+        print(f"Reply delivery error: {type(exc).__name__}: {exc}")
+        try:
+            send_message(token, chat_id, "回复发送失败，请稍后再试。")
+        except Exception:
+            pass
+
+
+def run_scheduled_dispatch(config: dict, token: str) -> None:
+    with DATA_LOCK:
+        dispatch_due_reminders(token)
+        dispatch_daily_reports(token, config)
+        dispatch_goal_reminders(token, config)
+        sync_sqlite_records()
+
+
+async def ptb_message_handler(update, context) -> None:
+    update_data = update.to_dict()
+    await asyncio.to_thread(
+        process_telegram_update,
+        context.application.bot_data["config"],
+        context.application.bot_data["token"],
+        update_data,
+    )
+
+
+async def ptb_schedule_handler(context) -> None:
+    await asyncio.to_thread(
+        run_scheduled_dispatch,
+        context.application.bot_data["config"],
+        context.application.bot_data["token"],
+    )
+
+
+async def ptb_error_handler(update, context) -> None:
+    print(f"Telegram runtime error: {type(context.error).__name__}: {context.error}")
+
+
+def run_modern_telegram(config: dict, token: str) -> bool:
+    try:
+        from telegram.ext import Application, MessageHandler, filters
+    except ImportError as exc:
+        print(f"python-telegram-bot unavailable, using legacy polling: {exc}")
+        return False
+    application = Application.builder().token(token).build()
+    application.bot_data["config"] = config
+    application.bot_data["token"] = token
+    application.add_handler(MessageHandler(filters.ALL, ptb_message_handler))
+    application.add_error_handler(ptb_error_handler)
+    if application.job_queue is None:
+        print("Telegram JobQueue unavailable, using legacy polling.")
+        return False
+    application.job_queue.run_repeating(ptb_schedule_handler, interval=5, first=0, name="liferecord-scheduler")
+    print("LifeRecordBot started with python-telegram-bot and APScheduler.")
+    application.run_polling(allowed_updates=["message"], drop_pending_updates=False)
+    return True
+
+
+def run_legacy_polling(config: dict, token: str) -> None:
+    print("LifeRecordBot started with compatibility polling.")
     while True:
         try:
-            dispatch_due_reminders(token)
-            dispatch_daily_reports(token, config)
-            dispatch_goal_reminders(token, config)
+            run_scheduled_dispatch(config, token)
             state = read_state()
             updates = http_json(
                 tg_url(token, "getUpdates"),
@@ -5426,47 +5591,11 @@ def main() -> None:
                 timeout=60,
             )
             for update in updates.get("result", []):
-                state["offset"] = update["update_id"] + 1
-                write_state(state)
-                append_raw(update)
-                message = update.get("message") or {}
-                chat = message.get("chat") or {}
-                user = message.get("from") or {}
-                chat_id = chat.get("id")
-                user_id = user.get("id")
-                text = message.get("text") or ""
-                reply_message = message.get("reply_to_message") or {}
-                quote = message.get("quote") or {}
-                reply_context = quote.get("text") or reply_message.get("text") or ""
-                if not chat_id:
-                    continue
-                if allowed_user_ids and user_id not in allowed_user_ids:
-                    send_message(token, chat_id, "未授权用户。")
-                    continue
-                try:
-                    if text:
-                        reply = handle_text(config, text, reply_context, chat_id)
-                    elif image_file_id_from_message(message):
-                        reply = handle_photo_message(config, token, message, chat_id)
-                    else:
-                        continue
-                    latest_state = read_state()
-                    remember_chat(latest_state, chat_id)
-                    reply = append_failure_protection_notice(latest_state, chat_id, reply)
-                    if isinstance(reply, dict):
-                        notice = append_first_daily_notice(latest_state, chat_id, "").strip()
-                        if notice:
-                            send_message(token, chat_id, notice)
-                    else:
-                        reply = append_first_daily_notice(latest_state, chat_id, reply)
-                    write_state(latest_state)
-                except Exception as exc:
-                    print(f"Message handling error: {type(exc).__name__}: {exc}")
-                    reply = BUG_FALLBACK_MESSAGE
-                try:
-                    send_reply(token, chat_id, reply)
-                except Exception as exc:
-                    send_message(token, chat_id, f"回复发送失败：{exc}")
+                with DATA_LOCK:
+                    state = read_state()
+                    state["offset"] = update["update_id"] + 1
+                    write_state(state)
+                process_telegram_update(config, token, update)
         except KeyboardInterrupt:
             print("Stopped.")
             break
@@ -5478,10 +5607,21 @@ def main() -> None:
             print(f"Network error: {exc}")
             time.sleep(5)
         except Exception as exc:
-            print(f"Runtime error: {exc}")
+            print(f"Runtime error: {type(exc).__name__}: {exc}")
             time.sleep(5)
+
+
+def main() -> None:
+    mutex = acquire_single_instance_lock()
+    if mutex is None:
+        print("LifeRecordBot is already running. This duplicate instance will exit.")
+        return
+    config = load_config()
+    ensure_files()
+    token = config["telegram_bot_token"]
+    if not run_modern_telegram(config, token):
+        run_legacy_polling(config, token)
 
 
 if __name__ == "__main__":
     main()
-

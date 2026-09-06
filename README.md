@@ -20,6 +20,19 @@
 - 删除、修改、最近记录查询
 - 可选：截图 / 小票 OCR 记账
 
+### 统一兼容层
+
+本版本不是让各功能各自判断、各自写文件，而是统一经过同一条处理链：
+
+1. JioNLP 辅助识别中文金额、时间、地点和长句分段。
+2. Pydantic 在保存前统一检查金额、日期、提醒周期和动作结构。
+3. 原有规则与 DeepSeek 共同负责意图分流；模糊输入仍进入确认，不会直接当闲聊。
+4. 所有记录继续保存为易查看的 CSV，并同步一份本地 SQLite 镜像用于一致性核对。
+5. Telegram 更新与定时任务使用同一处理入口，避免提醒和普通消息出现两套行为。
+6. RapidOCR 负责图片文字识别，失败时仍保留原 Tesseract 兼容路径。
+
+长句同类记录支持一次写多笔，例如：`九月三号咖啡9.9，12.5早餐，25午饭，20块游泳`。若一句话混合记账、天气、心情或提醒，则仍按多模块分别执行，不会被批量记账吞掉。
+
 ## 一、手机端准备 Telegram 机器人
 
 1. 手机打开 Telegram。
@@ -81,9 +94,10 @@ python -m pip install -r requirements.txt
 
 说明：
 
-- 基础聊天、记账、提醒主要使用 Python 标准库。
 - `Pillow` 用于生成收支图。
-- OCR 拍照记账需要额外安装 Tesseract，见后文可选项。
+- JioNLP 和 Pydantic 用于中文语义辅助与统一数据校验。
+- python-telegram-bot 与 APScheduler 用于消息接收和定时任务。
+- RapidOCR 与 ONNX Runtime 用于图片文字识别；Tesseract 仍可作为后备。
 
 ## 五、填写配置
 
@@ -287,21 +301,13 @@ shell:startup
 
 ## 十、可选：OCR 拍照记账
 
-如果你想发小票、支付截图让机器人识别，需要安装 Tesseract OCR。
+安装 `requirements.txt` 后已经包含 RapidOCR，可直接发送小票或支付截图。首次识别可能稍慢，之后会复用已加载的模型。
 
-Windows 可搜索安装：
-
-```text
-Tesseract OCR Windows
-```
-
-安装后，把路径填入 `config.json`：
+如果 RapidOCR 在个别电脑上不可用，机器人仍支持 Tesseract 作为后备。安装 Tesseract 和 `chi_sim` 中文语言包后，可在 `config.json` 填写：
 
 ```json
 "tesseract_cmd": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
 ```
-
-中文识别需要安装 `chi_sim` 语言包。
 
 ## 十一、常见问题
 

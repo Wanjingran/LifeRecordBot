@@ -27,3 +27,10 @@ venv/
 .idea/
 Thumbs.db
 Desktop.ini
+# Test and local database artifacts
+.pytest_cache/
+.pytest-tmp/
+.hypothesis/
+*.db
+*.db-wal
+*.db-shm
