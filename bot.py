@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import csv
 import ctypes
 import json
@@ -48,6 +49,7 @@ GOAL_LOGS_CSV = DATA_DIR / "goal_logs.csv"
 RAW_JSONL = DATA_DIR / "raw_messages.jsonl"
 STATE_PATH = ROOT / "state.json"
 DATA_LOCK = threading.RLock()
+BUDGET_FIELDS = ["period", "category", "amount", "income", "savings_target", "month", "created_at", "id"]
 DELETE_WORDS = (
     "删", "删除", "删掉", "删去", "移除", "去掉", "撤销", "撤回",
     "取消", "取消掉", "作废", "清除", "清掉", "抹掉", "关掉", "关闭",
@@ -111,7 +113,7 @@ def ensure_files() -> None:
     ensure_csv(NOTES_CSV, ["date", "content", "created_at", "id"])
     ensure_csv(MOODS_CSV, ["date", "mood", "score", "reason", "note", "created_at", "id"])
     ensure_csv(REMINDERS_CSV, ["id", "chat_id", "remind_at", "text", "status", "created_at", "sent_at", "repeat"])
-    ensure_csv(BUDGETS_CSV, ["period", "category", "amount", "created_at", "id"])
+    ensure_csv(BUDGETS_CSV, BUDGET_FIELDS)
     ensure_csv(TODOS_CSV, ["id", "text", "status", "due_date", "created_at", "done_at"])
     ensure_csv(GOALS_CSV, ["id", "chat_id", "title", "subject", "target_amount", "unit", "period", "reminder_time", "status", "created_at"])
     ensure_csv(GOAL_LOGS_CSV, ["goal_id", "date", "amount", "unit", "note", "created_at"])
@@ -200,7 +202,7 @@ def managed_record_headers() -> dict[Path, list[str]]:
         NOTES_CSV: ["date", "content", "created_at", "id"],
         MOODS_CSV: ["date", "mood", "score", "reason", "note", "created_at", "id"],
         REMINDERS_CSV: ["id", "chat_id", "remind_at", "text", "status", "created_at", "sent_at", "repeat"],
-        BUDGETS_CSV: ["period", "category", "amount", "created_at", "id"],
+        BUDGETS_CSV: BUDGET_FIELDS,
         TODOS_CSV: ["id", "text", "status", "due_date", "created_at", "done_at"],
         GOALS_CSV: ["id", "chat_id", "title", "subject", "target_amount", "unit", "period", "reminder_time", "status", "created_at"],
     }
@@ -607,13 +609,17 @@ def save_parsed(parsed: dict) -> str:
         lines = []
         total = 0.0
         history_rows = read_csv_rows(EXPENSES_CSV)
+        previous_rows = list(history_rows)
+        expense_dates = []
         anomaly_lines = []
         for item in items:
             amount = safe_amount(item.get("amount"))
             total += amount
             name = item.get("name", "")
             category = normalize_expense_category(name, item.get("category", "其他"))
-            anomaly_lines.extend(expense_anomaly_for_item(item.get("date", ""), name, amount, category, history_rows))
+            expense_date = item.get("date", "")
+            expense_dates.append(expense_date)
+            anomaly_lines.extend(expense_anomaly_for_item(expense_date, name, amount, category, history_rows))
             append_csv(EXPENSES_CSV, [
                 item.get("date", ""), name, amount,
                 category, item.get("note", ""), created_at, uuid.uuid4().hex,
@@ -621,7 +627,7 @@ def save_parsed(parsed: dict) -> str:
             history_rows.append({"date": item.get("date", ""), "item": name, "amount": str(amount), "category": category, "note": item.get("note", ""), "created_at": created_at})
             lines.append(f"- {item.get('date', '')} {name} {amount:g} 元 [{category}]")
         anomaly = expense_anomaly_notice(anomaly_lines)
-        return "已记录消费：\n" + "\n".join(lines) + f"\n本次合计：{total:g} 元\n{encouragement('expense')}" + anomaly + budget_warning_for_expense()
+        return "已记录消费：\n" + "\n".join(lines) + f"\n本次合计：{total:g} 元\n{encouragement('expense')}" + anomaly + budget_warning_for_expense(expense_dates, previous_rows)
 
     if kind == "income":
         lines = []
@@ -2786,7 +2792,7 @@ def due_todo_lines() -> list[str]:
 
 
 def budget_snapshot_lines(period: str = "month") -> list[str]:
-    budgets = [row for row in read_csv_rows(BUDGETS_CSV) if row.get("period") == period]
+    budgets = applicable_budget_rows(period, datetime.now().date())
     if not budgets:
         return []
     start, end, _ = period_range(period)
@@ -4608,27 +4614,101 @@ def parse_period(text: str) -> str:
 
 
 
+def budget_month_from_text(text: str, now: datetime | None = None) -> str:
+    now = now or datetime.now()
+    year_match = re.search(r"(20\d{2})\s*年", text)
+    year = int(year_match.group(1)) if year_match else now.year
+    month_names = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10, "十一": 11, "十二": 12}
+    month_match = re.search(r"(?<!本)(?<!个)(?<!这)(十二|十一|十|[一二三四五六七八九]|\d{1,2})\s*月", text)
+    if not month_match:
+        return f"{year:04d}-{now.month:02d}"
+    raw = month_match.group(1)
+    month = int(raw) if raw.isdigit() else month_names.get(raw, now.month)
+    if not 1 <= month <= 12:
+        return f"{year:04d}-{now.month:02d}"
+    return f"{year:04d}-{month:02d}"
+
+
+def money_near_keywords(text: str, keywords: tuple[str, ...]) -> float | None:
+    keyword_pattern = "|".join(sorted((re.escape(word) for word in keywords), key=len, reverse=True))
+    patterns = (
+        rf"(?:{keyword_pattern})[^\d]{{0,12}}(\d+(?:\.\d+)?)\s*(?:元|块)?",
+        rf"(\d+(?:\.\d+)?)\s*(?:元|块)?[^\d]{{0,6}}(?:{keyword_pattern})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            return float(match.group(1))
+    return None
+
+
 def finance_plan_from_text(text: str) -> str | None:
-    if not any(word in text for word in ("收入", "工资", "生活费")):
+    income_words = ("月收入", "工资", "生活费", "收入", "薪水", "薪资")
+    saving_words = ("计划省", "预计省", "想省", "省下", "计划存", "预计存", "想存", "存下", "储蓄目标", "结余", "留下")
+    if not any(word in text for word in income_words) or not any(word in text for word in saving_words):
         return None
-    if not any(word in text for word in ("省", "存", "结余", "留下")):
-        return None
-    nums = [float(item) for item in re.findall(r"\d+(?:\.\d+)?", text)]
-    if len(nums) < 2:
-        return None
-    income, saving = nums[0], nums[1]
+    income = money_near_keywords(text, income_words)
+    saving = money_near_keywords(text, saving_words)
+    if income is None or saving is None:
+        return "收入或储蓄目标没有看清楚。可以这样说：九月生活费3000，计划省1000。"
     if income <= 0 or saving < 0 or saving >= income:
-        return "财政规划金额不太对。可以这样说：本月收入3000，计划省1000。"
+        return "财政规划金额不太对。储蓄目标需要小于收入，例如：本月收入3000，计划省1000。"
+    month = budget_month_from_text(text)
     spend_limit = income - saving
+    year, month_number = (int(part) for part in month.split("-"))
+    daily_limit = spend_limit / calendar.monthrange(year, month_number)[1]
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    rows = []
-    if BUDGETS_CSV.exists():
-        with BUDGETS_CSV.open("r", encoding="utf-8-sig", newline="") as f:
-            rows = list(csv.DictReader(f))
-    rows = [row for row in rows if not (row.get("period") == "month" and row.get("category") == "总额")]
-    rows.append({"period": "month", "category": "总额", "amount": f"{spend_limit:g}", "created_at": created_at, "id": uuid.uuid4().hex})
-    write_csv_rows(BUDGETS_CSV, ["period", "category", "amount", "created_at", "id"], rows)
-    return f"已做好本月财政规划：收入 {income:g} 元，计划省 {saving:g} 元，本月可支出预算 {spend_limit:g} 元。之后每笔消费都会按总预算提醒。"
+    rows = read_csv_rows(BUDGETS_CSV)
+    rows = [row for row in rows if not (
+        row.get("period") == "month" and row.get("category") == "总额" and row.get("month", "") == month
+    )]
+    rows.append({
+        "period": "month", "category": "总额", "amount": f"{spend_limit:g}",
+        "income": f"{income:g}", "savings_target": f"{saving:g}", "month": month,
+        "created_at": created_at, "id": uuid.uuid4().hex,
+    })
+    write_csv_rows(BUDGETS_CSV, BUDGET_FIELDS, rows)
+    return (
+        f"已建立 {year}年{month_number}月财政规划：\n"
+        f"- 收入：{income:g} 元\n- 储蓄目标：{saving:g} 元\n"
+        f"- 可支出预算 {spend_limit:g} 元\n- 每日支出基准：{daily_limit:.2f} 元\n"
+        "之后记账若当天总支出超过基准，我会提醒你。"
+    )
+
+
+def without_finance_plan_duplicates(parsed: dict, text: str) -> dict:
+    income = money_near_keywords(text, ("月收入", "工资", "生活费", "收入", "薪水", "薪资"))
+    actions = parsed.get("actions") if isinstance(parsed.get("actions"), list) else [parsed]
+    kept = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        kind = action.get("type")
+        if kind == "budget":
+            continue
+        if kind == "income" and income is not None:
+            items = []
+            for item in action.get("items", []):
+                amount = safe_amount(item.get("amount"))
+                if abs(amount - income) <= 0.001:
+                    continue
+                items.append(item)
+            if not items:
+                continue
+            action = dict(action)
+            action["items"] = items
+        kept.append(action)
+    return {"actions": kept}
+
+def parse_budget_amount(text: str) -> float | None:
+    currency = re.findall(r"(\d+(?:\.\d+)?)\s*(?:元|块)", text)
+    if currency:
+        return float(currency[-1])
+    after_budget = re.search(r"(?:预算|限额)[^\d]{0,8}(\d+(?:\.\d+)?)", text)
+    if after_budget:
+        return float(after_budget.group(1))
+    numbers = re.findall(r"\d+(?:\.\d+)?", re.sub(r"(?:20\d{2}年)?\d{1,2}月", " ", text))
+    return float(numbers[-1]) if numbers else None
 
 
 def set_budget(text: str) -> str | None:
@@ -4637,8 +4717,8 @@ def set_budget(text: str) -> str | None:
         return plan_reply
     if not any(word in text for word in ("预算", "限额")):
         return None
-    amount = parse_amount(text)
-    if amount is None:
+    amount = parse_budget_amount(text)
+    if amount is None or amount <= 0:
         return "预算金额没有看清楚。你可以这样说：设置本月餐饮预算800"
     period = parse_period(text)
     category = "总额"
@@ -4646,72 +4726,137 @@ def set_budget(text: str) -> str | None:
         if name in text:
             category = name
             break
+    month = budget_month_from_text(text) if period == "month" else ""
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    rows = []
-    if BUDGETS_CSV.exists():
-        with BUDGETS_CSV.open("r", encoding="utf-8-sig", newline="") as f:
-            rows = list(csv.DictReader(f))
-    rows = [row for row in rows if not (row.get("period") == period and row.get("category") == category)]
-    rows.append({"period": period, "category": category, "amount": f"{amount:g}", "created_at": created_at, "id": uuid.uuid4().hex})
-    write_csv_rows(BUDGETS_CSV, ["period", "category", "amount", "created_at", "id"], rows)
-    title = "本周" if period == "week" else "本月"
+    rows = read_csv_rows(BUDGETS_CSV)
+    rows = [row for row in rows if not (
+        row.get("period") == period and row.get("category") == category and row.get("month", "") == month
+    )]
+    rows.append({
+        "period": period, "category": category, "amount": f"{amount:g}",
+        "income": "", "savings_target": "", "month": month,
+        "created_at": created_at, "id": uuid.uuid4().hex,
+    })
+    write_csv_rows(BUDGETS_CSV, BUDGET_FIELDS, rows)
+    title = "本周" if period == "week" else f"{int(month[5:])}月"
     return f"已设置{title}{category}预算：{amount:g} 元"
 
 
+def applicable_budget_rows(period: str, target_date) -> list[dict]:
+    month_key = target_date.strftime("%Y-%m") if period == "month" else ""
+    selected: dict[str, dict] = {}
+    for row in read_csv_rows(BUDGETS_CSV):
+        if row.get("period") != period:
+            continue
+        row_month = row.get("month", "")
+        if period == "month" and row_month not in {"", month_key}:
+            continue
+        category = row.get("category") or "总额"
+        current = selected.get(category)
+        if current is None or (row_month == month_key and current.get("month", "") != month_key):
+            selected[category] = row
+        elif row_month == current.get("month", "") and row.get("created_at", "") >= current.get("created_at", ""):
+            selected[category] = row
+    return list(selected.values())
+
+
+def monthly_expenses_for_date(rows: list[dict], target_date) -> list[dict]:
+    prefix = target_date.strftime("%Y-%m") + "-"
+    return [row for row in rows if str(row.get("date") or "").startswith(prefix)]
+
+
 def budget_status(period: str | None = None) -> str:
-    if period is None:
-        period = "month"
-    if not BUDGETS_CSV.exists():
-        return "还没有设置预算。你可以说：设置本月餐饮预算800"
-    with BUDGETS_CSV.open("r", encoding="utf-8-sig", newline="") as f:
-        budgets = [row for row in csv.DictReader(f) if row.get("period") == period]
+    period = period or "month"
+    today = datetime.now().date()
+    budgets = applicable_budget_rows(period, today)
     if not budgets:
-        return "这个周期还没有设置预算。"
-    start, end, title = period_range(period)
+        return "这个周期还没有设置预算。可以说：本月收入3000，计划省1000。"
+    if period == "month":
+        start = today.replace(day=1)
+        last_day = calendar.monthrange(today.year, today.month)[1]
+        end = today.replace(day=last_day)
+        title = f"{today.year}年{today.month}月"
+    else:
+        start, end, title = period_range(period)
     expenses = rows_between(EXPENSES_CSV, start, end)
     lines = [f"{title}预算："]
     for row in budgets:
         category = row.get("category") or "总额"
         limit = safe_amount(row.get("amount"))
-        if category == "总额":
-            used = sum(safe_amount(item.get("amount")) for item in expenses)
-        else:
-            used = sum(safe_amount(item.get("amount")) for item in expenses if item.get("category") == category)
+        used = sum(
+            safe_amount(item.get("amount")) for item in expenses
+            if category == "总额" or item.get("category") == category
+        )
         if limit <= 0:
             lines.append(f"- {category}: 预算金额异常，请重新设置")
             continue
-        ratio = used / limit
-        lines.append(f"- {category}: {used:g}/{limit:g} 元（{ratio:.0%}）")
+        lines.append(f"- {category}: {used:g}/{limit:g} 元（{used / limit:.0%}），剩余 {limit - used:g} 元")
+        income = safe_amount(row.get("income"))
+        saving = safe_amount(row.get("savings_target"))
+        if period == "month" and category == "总额" and income > 0:
+            days = calendar.monthrange(today.year, today.month)[1]
+            remaining_days = max(days - today.day + 1, 1)
+            suggested = max(limit - used, 0) / remaining_days
+            lines.append(f"- 收入 {income:g} 元，储蓄目标 {saving:g} 元，每日基准 {limit / days:.2f} 元")
+            lines.append(f"- 按本月剩余金额，之后每天建议不超过 {suggested:.2f} 元")
     return "\n".join(lines)
 
 
-def budget_warning_for_expense() -> str:
-    if not BUDGETS_CSV.exists():
-        return ""
-    with BUDGETS_CSV.open("r", encoding="utf-8-sig", newline="") as f:
-        budgets = list(csv.DictReader(f))
+def budget_warning_for_expense(expense_dates: list[str] | None = None, previous_rows: list[dict] | None = None) -> str:
+    all_expenses = read_csv_rows(EXPENSES_CSV)
+    previous_rows = previous_rows if previous_rows is not None else all_expenses
+    date_values = sorted(set(expense_dates or [datetime.now().date().isoformat()]))
     warnings = []
-    for period in ("week", "month"):
-        start, end, title = period_range(period)
-        expenses = rows_between(EXPENSES_CSV, start, end)
-        for row in budgets:
-            if row.get("period") != period:
+    for date_text in date_values:
+        try:
+            target = datetime.strptime(date_text, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        month_rows = monthly_expenses_for_date(all_expenses, target)
+        old_month_rows = monthly_expenses_for_date(previous_rows, target)
+        day_rows = [row for row in month_rows if row.get("date") == date_text]
+        old_day_rows = [row for row in old_month_rows if row.get("date") == date_text]
+        day_used = sum(safe_amount(row.get("amount")) for row in day_rows)
+        old_day_used = sum(safe_amount(row.get("amount")) for row in old_day_rows)
+        month_used = sum(safe_amount(row.get("amount")) for row in month_rows)
+        for row in applicable_budget_rows("month", target):
+            if row.get("category") != "总额" or safe_amount(row.get("income")) <= 0:
                 continue
-            category = row.get("category") or "总额"
             limit = safe_amount(row.get("amount"))
-            if limit <= 0:
-                continue
-            if category == "总额":
-                used = sum(safe_amount(item.get("amount")) for item in expenses)
+            days = calendar.monthrange(target.year, target.month)[1]
+            daily_limit = limit / days if limit > 0 else 0
+            if daily_limit > 0 and old_day_used <= daily_limit < day_used:
+                over = day_used - daily_limit
+                message = f"日预算提醒：{target.month}月{target.day}日已支出 {day_used:g} 元，超过每日基准 {daily_limit:.2f} 元 {over:.2f} 元。"
+                if target == datetime.now().date():
+                    remaining_days = max(days - target.day, 1)
+                    suggested = max(limit - month_used, 0) / remaining_days
+                    message += f" 本月还可支出 {limit - month_used:g} 元，之后每天建议不超过 {suggested:.2f} 元。"
+                warnings.append(message)
+        for period in ("week", "month"):
+            if period == "month":
+                relevant = month_rows
+                old_relevant = old_month_rows
+                title = f"{target.month}月"
             else:
-                used = sum(safe_amount(item.get("amount")) for item in expenses if item.get("category") == category)
-            ratio = used / limit
-            if ratio >= 1:
-                warnings.append(f"{title}{category}预算已超出：{used:g}/{limit:g} 元")
-            elif ratio >= 0.9:
-                warnings.append(f"{title}{category}预算已经到 {ratio:.0%}：{used:g}/{limit:g} 元")
-    return "\n" + "\n".join(warnings[:3]) if warnings else ""
-
+                week_start = target - timedelta(days=target.weekday())
+                week_end = week_start + timedelta(days=6)
+                relevant = [row for row in all_expenses if week_start.isoformat() <= row.get("date", "") <= week_end.isoformat()]
+                old_relevant = [row for row in previous_rows if week_start.isoformat() <= row.get("date", "") <= week_end.isoformat()]
+                title = "本周" if week_start <= datetime.now().date() <= week_end else "该周"
+            for row in applicable_budget_rows(period, target):
+                category = row.get("category") or "总额"
+                limit = safe_amount(row.get("amount"))
+                if limit <= 0:
+                    continue
+                used = sum(safe_amount(item.get("amount")) for item in relevant if category == "总额" or item.get("category") == category)
+                old_used = sum(safe_amount(item.get("amount")) for item in old_relevant if category == "总额" or item.get("category") == category)
+                threshold = 1.0 if used >= limit else 0.9
+                if old_used / limit < threshold <= used / limit:
+                    state = "已超出" if used >= limit else f"已经到 {used / limit:.0%}"
+                    warnings.append(f"{title}{category}预算{state}：{used:g}/{limit:g} 元")
+    unique = list(dict.fromkeys(warnings))
+    return "\n" + "\n".join(unique[:4]) if unique else ""
 
 def add_todo(text: str) -> str | None:
     if text.startswith(("添加待办", "新增待办", "待办")) or "加入待办" in text:
@@ -4935,11 +5080,18 @@ def save_budget_action(parsed: dict) -> str:
             amount = safe_amount(item.get("amount"))
         except (TypeError, ValueError):
             continue
-        rows = [row for row in rows if not (row.get("period") == period and row.get("category") == category)]
-        rows.append({"period": period, "category": category, "amount": f"{amount:g}", "created_at": created_at, "id": uuid.uuid4().hex})
+        month = datetime.now().strftime("%Y-%m") if period == "month" else ""
+        rows = [row for row in rows if not (
+            row.get("period") == period and row.get("category") == category and row.get("month", "") == month
+        )]
+        rows.append({
+            "period": period, "category": category, "amount": f"{amount:g}",
+            "income": "", "savings_target": "", "month": month,
+            "created_at": created_at, "id": uuid.uuid4().hex,
+        })
         title = "本周" if period == "week" else "本月"
         lines.append(f"- {title}{category}预算 {amount:g} 元")
-    write_csv_rows(BUDGETS_CSV, ["period", "category", "amount", "created_at", "id"], rows)
+    write_csv_rows(BUDGETS_CSV, BUDGET_FIELDS, rows)
     if not lines:
         return "没有识别到可保存的预算。"
     return "已设置预算：\n" + "\n".join(lines)
@@ -5500,7 +5652,7 @@ def handle_pending_confirmation_center(config: dict, text: str, chat_id: int | N
 def handle_text(config: dict, text: str, reply_context: str = "", chat_id: int | None = None) -> str | dict:
     text = text.strip()
     if text in {"/start", "/help", "帮助"}:
-        return "直接发记录或问题都可以：\n午饭 23，奶茶 15\n兼职收入 200\n每天学习python 15min\n我学习python学了10min\n7月12日妈妈生日，提前3天提醒\n明天早上8点提醒我起床\n添加待办 明天交作业\n记一下今天去了图书馆\n设置本月餐饮预算800\n帮我把一周算法复习拆成计划\n本周娱乐花了多少\n我最近钱花哪了\n切换严格模式\n\n命令：\n/today 今日总结\n/week 本周总结\n/month 本月总结\n/year 今年总结\n/chart 本月收支图\n/chart year 今年收支图\n/morning 晨报\n/evening 晚报\n心情趋势\n/dates 查看重要事项\n/recent 查看最近记录\n/reminders 提醒列表\n/todo 今日任务\n/budget 预算情况\n/mood 倾诉/鼓励模式\n\n普通聊天不会自动记入生活事项；想记生活日志可以说：记一下……\n也可以直接发小票/支付截图；若电脑装了 OCR，会尝试自动记账。"
+        return "直接发记录或问题都可以：\n午饭 23，奶茶 15\n兼职收入 200\n每天学习python 15min\n我学习python学了10min\n7月12日妈妈生日，提前3天提醒\n明天早上8点提醒我起床\n添加待办 明天交作业\n记一下今天去了图书馆\n设置本月餐饮预算800\n本月生活费3000，计划省1000\n帮我把一周算法复习拆成计划\n本周娱乐花了多少\n我最近钱花哪了\n切换严格模式\n\n命令：\n/today 今日总结\n/week 本周总结\n/month 本月总结\n/year 今年总结\n/chart 本月收支图\n/chart year 今年收支图\n/morning 晨报\n/evening 晚报\n心情趋势\n/dates 查看重要事项\n/recent 查看最近记录\n/reminders 提醒列表\n/todo 今日任务\n/budget 预算情况\n/mood 倾诉/鼓励模式\n\n普通聊天不会自动记入生活事项；想记生活日志可以说：记一下……\n也可以直接发小票/支付截图；若电脑装了 OCR，会尝试自动记账。"
 
     tone_reply = set_tone_mode_reply(text)
     if tone_reply:
@@ -5584,6 +5736,18 @@ def handle_text(config: dict, text: str, reply_context: str = "", chat_id: int |
         parsed = without_unrequested_notes(parsed, text, chat_id)
         return combine_reply_parts([task_complete_reply, execute_parsed_result(parsed, chat_id, config, text)])
 
+    finance_reply = finance_plan_from_text(text)
+    if finance_reply:
+        if not has_multi_intent_hint(text):
+            return finance_reply
+        prompt_text = text
+        if reply_context:
+            prompt_text = f"用户引用的上一条机器人消息：\n{reply_context}\n\n用户新消息：{text}"
+        parsed = call_deepseek(config, prompt_text)
+        parsed = augment_parsed_actions(parsed, text)
+        parsed = without_finance_plan_duplicates(parsed, text)
+        parsed = without_unrequested_notes(parsed, text, chat_id)
+        return combine_reply_parts([finance_reply, execute_parsed_result(parsed, chat_id, config, text)])
     history_reply = history_search_reply(text)
     if history_reply:
         return history_reply

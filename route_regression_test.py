@@ -1021,6 +1021,38 @@ def assert_food_transport_weather_budget_cases(failures: list[str]) -> None:
             failures.append(f"finance plan budget: unexpected reply {reply!r}")
         if not rows or rows[-1].get("category") != U(r"\u603b\u989d") or rows[-1].get("amount") != "2000":
             failures.append(f"finance plan budget: unexpected rows {rows!r}")
+        expected_month = f"{bot.datetime.now().year}-09"
+        reply = bot.set_budget(U(r"\u4e5d\u6708\u751f\u6d3b\u8d394000\uff0c\u9884\u8ba1\u77011000"))
+        rows = bot.read_csv_rows(bot.BUDGETS_CSV)
+        plan = rows[-1] if rows else {}
+        if plan.get("month") != expected_month or plan.get("income") != "4000" or plan.get("savings_target") != "1000" or plan.get("amount") != "3000":
+            failures.append(f"finance plan month/amount parsing: reply={reply!r}, row={plan!r}")
+        category_reply = bot.set_budget(U(r"9\u6708\u9910\u996e\u9884\u7b97800"))
+        category_rows = bot.read_csv_rows(bot.BUDGETS_CSV)
+        category_plan = category_rows[-1] if category_rows else {}
+        if category_plan.get("amount") != "800" or category_plan.get("month") != expected_month:
+            failures.append(f"numeric month budget amount: reply={category_reply!r}, row={category_plan!r}")
+        expense_date = expected_month + "-06"
+        first_reply = bot.save_parsed({"type": "expense", "items": [{"date": expense_date, "name": U(r"\u65e9\u9910"), "amount": 60, "category": U(r"\u9910\u996e"), "note": ""}]})
+        second_reply = bot.save_parsed({"type": "expense", "items": [{"date": expense_date, "name": U(r"\u665a\u9910"), "amount": 50, "category": U(r"\u9910\u996e"), "note": ""}]})
+        if U(r"\u65e5\u9884\u7b97\u63d0\u9192") in first_reply or U(r"\u65e5\u9884\u7b97\u63d0\u9192") not in second_reply:
+            failures.append(f"daily budget crossing warning: first={first_reply!r}, second={second_reply!r}")
+        status_reply = bot.budget_status("month")
+        if U(r"\u6536\u5165 4000 \u5143") not in status_reply:
+            failures.append(f"budget status missing income/savings detail: {status_reply!r}")
+        original_call_deepseek = bot.call_deepseek
+        try:
+            bot.call_deepseek = lambda _config, _text: {"actions": [
+                {"type": "income", "items": [{"date": bot.datetime.now().date().isoformat(), "source": U(r"\u751f\u6d3b\u8d39"), "amount": 4000, "category": U(r"\u5176\u4ed6"), "note": ""}]},
+                {"type": "expense", "items": [{"date": bot.datetime.now().date().isoformat(), "name": U(r"\u5348\u996d"), "amount": 20, "category": U(r"\u9910\u996e"), "note": ""}]},
+            ]}
+            multi_reply = bot.handle_text({}, U(r"\u4e5d\u6708\u751f\u6d3b\u8d394000\uff0c\u60f3\u77011000\uff0c\u4eca\u5929\u5348\u996d20"), chat_id=77)
+        finally:
+            bot.call_deepseek = original_call_deepseek
+        incomes = bot.read_csv_rows(bot.INCOME_CSV)
+        expenses = bot.read_csv_rows(bot.EXPENSES_CSV)
+        if incomes or not any(row.get("item") == U(r"\u5348\u996d") and row.get("amount") == "20.0" for row in expenses):
+            failures.append(f"multi budget duplicate filtering: reply={multi_reply!r}, incomes={incomes!r}, expenses={expenses!r}")
 
 def assert_quote_delete_recent_cases(failures: list[str]) -> None:
     with tempfile.TemporaryDirectory() as tmp:
