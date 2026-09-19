@@ -1263,6 +1263,42 @@ def assert_expense_time_ambiguity_cases(failures: list[str]) -> None:
                 failures.append(f"expense/time ambiguity reminder choice: reply={reply!r}, row={saved_reminder!r}")
         finally:
             bot.call_deepseek = original_call_deepseek
+def assert_chinese_date_long_record_cases(failures: list[str]) -> None:
+    year = bot.datetime.now().year
+    expected = f"{year}-09-15"
+    for source in ("九月十五号晚餐14.9", "九月15号晚餐14.9", "9月十五号晚餐14.9"):
+        actual = bot.expense_record_date(source)
+        if actual != expected:
+            failures.append(f"Chinese/mixed date parse: source={source!r}, actual={actual!r}")
+    if bot.explicit_date_markers("咖啡9.9块"):
+        failures.append("decimal amount was incorrectly recognized as a date")
+    explicit_year = bot.expense_record_date("二〇二六年九月十六号咖啡9.9")
+    if explicit_year != "2026-09-16":
+        failures.append(f"Chinese explicit year parse: actual={explicit_year!r}")
+
+    text = (
+        "九月十六号 9.9块咖啡，12.5块早餐，20.7块买东西，27.8块晚餐，"
+        "九月十七号 9.9咖啡，12.5块早餐，25块中餐，六块魔爪饮料，27.8块晚餐，10块健身，"
+        "九月十八号 10块健身，咖啡9.9块，早餐12.5块，22.9块晚餐，五块洗衣服"
+    )
+    actions = bot.complete_local_record_actions(text)
+    items = actions[0].get("items", []) if len(actions) == 1 and actions[0].get("type") == "expense" else []
+    expected_counts = {f"{year}-09-16": 4, f"{year}-09-17": 6, f"{year}-09-18": 5}
+    actual_counts = {day: sum(1 for item in items if item.get("date") == day) for day in expected_counts}
+    if len(items) != 15 or actual_counts != expected_counts:
+        failures.append(f"date-scoped long expense parse: count={len(items)}, dates={actual_counts!r}, actions={actions!r}")
+    categories = {item.get("name"): item.get("category") for item in items}
+    for name, category in (("魔爪饮料", "餐饮"), ("洗衣服", "购物"), ("健身", "娱乐"), ("东西", "购物")):
+        if categories.get(name) != category:
+            failures.append(f"long expense category: {name!r} -> {categories.get(name)!r}, expected {category!r}")
+    amounts = {(item.get("name"), item.get("amount")) for item in items}
+    if ("魔爪饮料", 6.0) not in amounts or ("洗衣服", 5.0) not in amounts:
+        failures.append(f"Chinese money in long expense parse: amounts={amounts!r}")
+
+    mixed_skill = bot.complete_local_record_actions("九月十六号早餐10块，明天天气如何，晚餐20块")
+    if mixed_skill:
+        failures.append(f"long record parser swallowed another skill: {mixed_skill!r}")
+
 def main() -> None:
     failures: list[str] = []
     assert_route_cases(failures)
@@ -1274,6 +1310,7 @@ def main() -> None:
     assert_undo_and_error_fallback_cases(failures)
     assert_incomplete_expense_confirmation_cases(failures)
     assert_expense_time_ambiguity_cases(failures)
+    assert_chinese_date_long_record_cases(failures)
     assert_note_confirmation_cases(failures)
     assert_note_guard_cases(failures)
     assert_goal_tone_history_cases(failures)

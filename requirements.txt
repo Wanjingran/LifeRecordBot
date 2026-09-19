@@ -1,5 +1,6 @@
 Pillow>=10,<13
 jionlp==1.5.29
+cn2an>=0.5.23,<1
 pydantic>=2.13,<3
 python-telegram-bot[job-queue]>=22.8,<23
 APScheduler>=3.11,<3.12

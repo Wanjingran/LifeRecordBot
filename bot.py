@@ -18,7 +18,14 @@ from pathlib import Path
 from urllib import error, request
 from urllib.parse import quote, urlencode
 
+try:
+    import cn2an
+except ImportError:  # Preserve a clear startup path for older installations.
+    cn2an = None
+
 from skill_runtime import (
+    EntityMatch,
+    EntitySpan,
     analyze_semantics,
     first_money_match,
     rapid_ocr_text,
@@ -707,20 +714,43 @@ def parse_remind_days(text: str) -> int:
     return max(0, value or 0)
 
 
+CHINESE_DATE_NUMBER = r"[零〇一二两三四五六七八九十百廿卅]{1,5}"
+DATE_NUMBER = rf"(?:\d{{1,4}}|{CHINESE_DATE_NUMBER})"
+EXPLICIT_DATE_PATTERN = re.compile(
+    rf"(?:(?P<year_text>{DATE_NUMBER})\s*年\s*)?"
+    rf"(?P<month_text>{DATE_NUMBER})\s*月\s*(?P<day_text>{DATE_NUMBER})\s*(?:日|号)?"
+    rf"|(?P<year_numeric>\d{{4}})[-/.](?P<month_numeric>\d{{1,2}})[-/.](?P<day_numeric>\d{{1,2}})(?:日|号)?"
+)
+
+
+def explicit_date_markers(text: str, default_year: int | None = None) -> list[tuple[int, int, datetime.date, bool]]:
+    """Return explicit dates in source order, including mixed Chinese/Arabic forms."""
+    year_default = default_year or datetime.now().year
+    markers = []
+    for match in EXPLICIT_DATE_PATTERN.finditer(str(text or "")):
+        year_token = match.group("year_text") or match.group("year_numeric")
+        month_token = match.group("month_text") or match.group("month_numeric")
+        day_token = match.group("day_text") or match.group("day_numeric")
+        year = chinese_number_to_int(year_token) if year_token else year_default
+        month = chinese_number_to_int(month_token)
+        day = chinese_number_to_int(day_token)
+        if not year or not month or not day:
+            continue
+        try:
+            parsed = datetime(year, month, day).date()
+        except ValueError:
+            continue
+        markers.append((match.start(), match.end(), parsed, bool(year_token)))
+    return markers
+
+
 def parse_item_date(text: str) -> datetime.date | None:
     today = datetime.now().date()
-    match = re.search(r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?", text)
-    if match:
-        try:
-            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3))).date()
-        except ValueError:
-            return None
-    match = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|号)?", text)
-    if match:
-        try:
-            day = datetime(today.year, int(match.group(1)), int(match.group(2))).date()
-        except ValueError:
-            return None
+    markers = explicit_date_markers(text, default_year=today.year)
+    if markers:
+        day = markers[0][2]
+        if markers[0][3]:
+            return day
         if day < today:
             try:
                 day = day.replace(year=today.year + 1)
@@ -3548,6 +3578,11 @@ def expense_amount_match(text: str) -> re.Match | None:
         if re.match(r"\s*(?:年|月|日|号|点|时|分钟|分|小时|次|个|组|公里|km|kg|公斤)", tail, re.I):
             continue
         return match
+    for match in re.finditer(r"([零〇一二两三四五六七八九十百千万廿卅]+)\s*(?:元|块)", text):
+        value = chinese_number_to_int(match.group(1))
+        if value is not None and value > 0:
+            entity = EntitySpan(match.group(0), match.start(), match.end(), f"{value:g}", "money")
+            return EntityMatch(entity)
     return first_money_match(text)
 
 
@@ -3573,7 +3608,7 @@ def has_expense_hint(text: str) -> bool:
     expense_words = (
         "早餐", "午饭", "午餐", "晚饭", "晚餐", "夜宵", "奶茶", "咖啡", "打车", "地铁", "公交",
         "充值", "续费", "买", "花", "消费", "开销", "支出", "支付", "付款", "扣费", "花了", "花掉", "元", "块",
-        "外卖", "电影", "游戏", "网吧", "网咖", "健身", "游泳", "洗衣服", "洗衣", "房租", "水电", "话费",
+        "外卖", "饮料", "饮品", "水果", "零食", "小吃", "电影", "游戏", "网吧", "网咖", "健身", "游泳", "洗衣服", "洗衣", "房租", "水电", "话费",
     )
     income_words = ("收入", "工资", "兼职", "赚", "到账", "入账", "红包", "报销", "收款", "生活费", "奖学金", "补贴")
     if not expense_amount_match(text) or not any(word in text for word in expense_words):
@@ -4356,31 +4391,14 @@ def expense_record_date(text: str) -> str:
     relative = local_record_date(text)
     if any(word in text for word in ("今天", "今日", "昨天", "前天", "明天")):
         return relative
-    today = datetime.now().date()
-    match = re.search(r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})(?:日|号)?", text)
-    if match:
-        try:
-            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3))).date().isoformat()
-        except ValueError:
-            return relative
-    match = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|号)", text)
-    if not match:
-        match = re.search(r"([一二两三四五六七八九十]{1,3})\s*月\s*([一二两三四五六七八九十]{1,3})\s*(?:日|号)", text)
-    if match:
-        month = chinese_number_to_int(match.group(1))
-        day = chinese_number_to_int(match.group(2))
-        if month and day:
-            try:
-                return datetime(today.year, month, day).date().isoformat()
-            except ValueError:
-                return relative
+    markers = explicit_date_markers(text)
+    if markers:
+        return markers[0][2].isoformat()
     return relative
 
 
 def strip_expense_date_noise(text: str) -> str:
-    text = re.sub(r"\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}(?:日|号)?", "", text)
-    text = re.sub(r"\d{1,2}\s*月\s*\d{1,2}\s*(?:日|号)", "", text)
-    text = re.sub(r"[一二两三四五六七八九十]{1,3}\s*月\s*[一二两三四五六七八九十]{1,3}\s*(?:日|号)", "", text)
+    text = EXPLICIT_DATE_PATTERN.sub("", text)
     text = re.sub(r"(今天|今日|昨天|前天|明天|刚刚|刚才)", "", text)
     return text.strip(" ：:，,。？?的了")
 
@@ -4410,7 +4428,7 @@ def local_simple_expense_parse(text: str) -> dict | None:
     name = strip_record_noise(strip_expense_date_noise(before)) or strip_record_noise(strip_expense_date_noise(after)) or "消费"
     if len(name) > 30:
         name = name[-30:]
-    category = normalize_expense_category(name, "其他")
+    category = normalize_expense_category(text, "其他")
     return {"type": "expense", "items": [{"date": expense_record_date(text), "name": name, "amount": amount, "category": category, "note": ""}]}
 
 
@@ -4452,7 +4470,7 @@ def local_expense_item_from_segment(segment: str) -> dict | None:
     name = strip_record_noise(strip_expense_date_noise(before)) or strip_record_noise(strip_expense_date_noise(after)) or "消费"
     if len(name) > 30:
         name = name[-30:]
-    return {"date": expense_record_date(segment), "name": name, "amount": amount, "category": normalize_expense_category(name, "其他"), "note": ""}
+    return {"date": expense_record_date(segment), "name": name, "amount": amount, "category": normalize_expense_category(segment, "其他"), "note": ""}
 
 
 def local_income_item_from_segment(segment: str) -> dict | None:
@@ -4475,15 +4493,20 @@ def local_income_item_from_segment(segment: str) -> dict | None:
 def local_record_actions_from_text(text: str) -> list[dict]:
     expense_items = []
     income_items = []
-    shared_date = expense_record_date(text)
+    current_date = datetime.now().date().isoformat()
     for segment in split_intent_segments(text):
+        if any(word in segment for word in ("今天", "今日", "昨天", "前天", "明天")):
+            current_date = local_record_date(segment)
+        markers = explicit_date_markers(segment)
+        if markers:
+            current_date = markers[-1][2].isoformat()
         income_item = local_income_item_from_segment(segment)
         if income_item:
-            income_item["date"] = shared_date
+            income_item["date"] = current_date
             income_items.append(income_item)
         expense_item = local_expense_item_from_segment(segment)
         if expense_item:
-            expense_item["date"] = shared_date
+            expense_item["date"] = current_date
             expense_items.append(expense_item)
     actions = []
     if expense_items:
@@ -4499,7 +4522,18 @@ def complete_local_record_actions(text: str) -> list[dict]:
         return []
     actions = local_record_actions_from_text(text)
     parsed_count = sum(len(action.get("items") or []) for action in actions)
-    return actions if parsed_count == len(segments) else []
+    record_segments = 0
+    has_other_intent = False
+    for segment in segments:
+        is_record = bool(expense_amount_match(segment) and (has_expense_hint(segment) or has_income_hint(segment)))
+        if is_record:
+            record_segments += 1
+            continue
+        remainder = strip_expense_date_noise(segment)
+        remainder = re.sub(r"(今天|今日|昨天|前天|明天)", "", remainder).strip(" ：:，,。？?")
+        if remainder:
+            has_other_intent = True
+    return actions if record_segments >= 2 and parsed_count == record_segments and not has_other_intent else []
 
 
 def local_study_plan_action(text: str) -> dict:
@@ -5101,7 +5135,24 @@ def chinese_number_to_int(text: str) -> int | None:
     text = str(text or "").strip()
     if text.isdigit():
         return int(text)
-    digits = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    if cn2an is not None:
+        try:
+            value = cn2an.cn2an(text, "smart")
+            if isinstance(value, (int, float)) and float(value).is_integer():
+                return int(value)
+        except (TypeError, ValueError):
+            pass
+    digits = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    if text == "廿":
+        return 20
+    if text.startswith("廿"):
+        return 20 + digits.get(text[1:], 0)
+    if text == "卅":
+        return 30
+    if text.startswith("卅"):
+        return 30 + digits.get(text[1:], 0)
+    if "十" not in text and text and all(char in digits for char in text):
+        return int("".join(str(digits[char]) for char in text))
     if text in digits:
         return digits[text]
     if text == "十":
