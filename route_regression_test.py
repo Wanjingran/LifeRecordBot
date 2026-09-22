@@ -1245,6 +1245,15 @@ def assert_expense_time_ambiguity_cases(failures: list[str]) -> None:
             if "已记录消费" not in str(reply) or saved.get("item") != "健身" or saved.get("amount") != "10.0" or saved.get("category") != "娱乐":
                 failures.append(f"explicit fitness expense: reply={reply!r}, row={saved!r}")
 
+            reply = bot.handle_text(config, "昨天洗衣服五块", chat_id=999)
+            rows = bot.read_csv_rows(bot.EXPENSES_CSV)
+            saved = rows[-1] if rows else {}
+            yesterday = (bot.datetime.now().date() - bot.timedelta(days=1)).isoformat()
+            if "已记录消费" not in str(reply) or saved.get("date") != yesterday or saved.get("item") != "洗衣服" or saved.get("amount") != "5.0" or saved.get("category") != "购物":
+                failures.append(f"Chinese explicit currency expense: reply={reply!r}, row={saved!r}")
+            if bot.ambiguous_expense_or_time_candidate("昨天洗衣服五块") is not None:
+                failures.append("Chinese explicit currency was incorrectly treated as time ambiguity")
+
             if bot.ambiguous_expense_or_time_candidate("九月四号10点健身") is not None:
                 failures.append("expense/time guard: explicit clock should not ask expense/time confirmation")
             if bot.expense_amount_match("今天健身10次") is not None:

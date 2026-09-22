@@ -5409,7 +5409,8 @@ def pending_expense_or_time_store(state: dict) -> dict:
 
 
 def explicit_currency_amount(text: str) -> bool:
-    return bool(re.search(r"\d+(?:\.\d+)?\s*(?:元|块|rmb|RMB)", text))
+    number = r"(?:\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百千万亿两廿卅点壹贰叁肆伍陆柒捌玖拾佰仟]+)"
+    return bool(re.search(rf"(?:{number}\s*(?:元|块|圆)(?:钱)?|(?:人民币|rmb)\s*{number})", text, re.I))
 
 
 def ambiguous_expense_or_time_candidate(text: str) -> dict | None:
